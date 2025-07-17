@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Log</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; background-color: #f4f4f9; }
+        table { width: 100%; border-collapse: collapse; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+        th { background-color: #4CAF50; color: white; }
+        tr:nth-child(even) { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Attendance Log</h1>
+    <table id="attendance-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Student ID</th>
+                <th>Class ID</th>
+                <th>Timestamp</th>
+            </tr>
+        </thead>
+        <tbody>
+            </tbody>
+    </table>
+
+    <script>
+        // Fetch data from our API and populate the table
+        async function fetchAttendance() {
+            try {
+                const response = await fetch('/api/attendance');
+                const data = await response.json();
+                
+                const tbody = document.querySelector('#attendance-table tbody');
+                tbody.innerHTML = ''; // Clear existing rows
+
+                data.forEach(record => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${record.id}</td>
+                        <td>${record.student_id}</td>
+                        <td>${record.class_id}</td>
+                        <td>${new Date(record.timestamp).toLocaleString()}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Failed to fetch attendance:', error);
+            }
+        }
+
+        // Fetch data when the page loads and then every 10 seconds
+        fetchAttendance();
+        setInterval(fetchAttendance, 10000);
+    </script>
+</body>
+</html>
