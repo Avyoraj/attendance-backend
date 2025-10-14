@@ -91,6 +91,69 @@ app.use(ensureConnection);
 // ==========================================
 
 /**
+ * POST /api/validate-device
+ * Validate device BEFORE login (prevents locked users from accessing app)
+ * Returns: { canLogin: boolean, error?: string, lockedToStudent?: string }
+ */
+app.post('/api/validate-device', async (req, res) => {
+  try {
+    const { studentId, deviceId } = req.body;
+
+    // Validation
+    if (!studentId || !deviceId) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['studentId', 'deviceId']
+      });
+    }
+
+    console.log(`🔐 VALIDATING LOGIN: Student ${studentId} on device ${deviceId.substring(0, 8)}...`);
+
+    // Check if this device is already registered to ANY student
+    const existingDeviceUser = await Student.findOne({ deviceId });
+    
+    if (existingDeviceUser) {
+      if (existingDeviceUser.studentId !== studentId) {
+        // Device is locked to DIFFERENT student - BLOCK LOGIN
+        console.log(`❌ LOGIN BLOCKED: Device locked to student ${existingDeviceUser.studentId}`);
+        return res.status(403).json({
+          canLogin: false,
+          error: 'Device already registered',
+          message: `This device is already linked to student ID: ${existingDeviceUser.studentId}`,
+          lockedToStudent: existingDeviceUser.studentId,
+          lockedSince: existingDeviceUser.deviceRegisteredAt
+        });
+      } else {
+        // Device is registered to THIS student - ALLOW LOGIN
+        console.log(`✅ LOGIN ALLOWED: Device verified for student ${studentId}`);
+        return res.status(200).json({
+          canLogin: true,
+          message: 'Welcome back!'
+        });
+      }
+    } else {
+      // Device is NOT registered to anyone - ALLOW LOGIN
+      console.log(`✅ LOGIN ALLOWED: New device for student ${studentId}`);
+      return res.status(200).json({
+        canLogin: true,
+        message: 'Device will be registered on first check-in'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Device validation error:', error);
+    res.status(500).json({ 
+      error: 'Device validation failed',
+      details: error.message 
+    });
+  }
+});
+
+// ==========================================
+// ATTENDANCE ENDPOINTS
+// ==========================================
+
+/**
  * POST /api/check-in
  * Main attendance check-in endpoint
  * Compatible with existing Flutter app
