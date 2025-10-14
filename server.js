@@ -367,6 +367,62 @@ app.post('/api/attendance/confirm', async (req, res) => {
 });
 
 /**
+ * POST /api/attendance/cancel-provisional
+ * Cancel provisional attendance (student left before confirmation)
+ * CRITICAL: This prevents false attendance when student leaves early
+ */
+app.post('/api/attendance/cancel-provisional', async (req, res) => {
+  try {
+    const { studentId, classId } = req.body;
+
+    if (!studentId || !classId) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        required: ['studentId', 'classId']
+      });
+    }
+
+    const today = new Date();
+    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+    // Delete provisional attendance only (not confirmed ones)
+    const result = await Attendance.findOneAndDelete({
+      studentId,
+      classId,
+      sessionDate,
+      status: 'provisional'
+    });
+
+    if (!result) {
+      return res.status(404).json({
+        error: 'No provisional attendance found',
+        message: 'Cannot cancel attendance that does not exist or is already confirmed'
+      });
+    }
+
+    console.log(`🚫 Cancelled provisional attendance for ${studentId} in ${classId} (left before confirmation)`);
+
+    res.status(200).json({
+      message: 'Provisional attendance cancelled successfully',
+      reason: 'Student left classroom before confirmation period ended (out of beacon range)',
+      cancelled: {
+        studentId: result.studentId,
+        classId: result.classId,
+        checkInTime: result.checkInTime,
+        sessionDate: result.sessionDate
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Cancellation error:', error);
+    res.status(500).json({ 
+      error: 'Failed to cancel provisional attendance',
+      details: error.message 
+    });
+  }
+});
+
+/**
  * GET /api/attendance
  * Get attendance records (for dashboard)
  */
