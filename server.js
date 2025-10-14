@@ -50,6 +50,17 @@ const connectToMongoDB = async () => {
     console.log(`   - Students: ${studentCount}`);
     console.log(`   - Attendance Records: ${attendanceCount}`);
 
+    // ✅ Ensure unique index on deviceId (sparse = allows multiple nulls)
+    await Student.collection.createIndex(
+      { deviceId: 1 }, 
+      { 
+        unique: true, 
+        sparse: true, // Allows multiple null values
+        name: 'deviceId_unique_idx' 
+      }
+    );
+    console.log('✅ Device uniqueness index ensured');
+
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
     isConnected = false;
@@ -100,47 +111,61 @@ app.post('/api/check-in', async (req, res) => {
     const today = new Date();
     const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-    // Check if student exists, create if not
+    // ✅ CRITICAL: Check device FIRST (before student creation)
+    if (deviceId) {
+      console.log(`🔍 Checking device availability: ${deviceId.substring(0, 8)}... for student ${studentId}`);
+      
+      // Check if this device is already registered to ANY student (including this one)
+      const existingDeviceUser = await Student.findOne({ deviceId });
+      
+      if (existingDeviceUser) {
+        // Device is already registered
+        if (existingDeviceUser.studentId !== studentId) {
+          // Registered to DIFFERENT student - BLOCK
+          console.log(`❌ BLOCKED: Device ${deviceId.substring(0, 8)}... is locked to student ${existingDeviceUser.studentId}`);
+          return res.status(403).json({
+            error: 'Device already registered',
+            message: `This device is already linked to another student account (${existingDeviceUser.studentId})`,
+            lockedToStudent: existingDeviceUser.studentId,
+            lockedSince: existingDeviceUser.deviceRegisteredAt
+          });
+        } else {
+          // Registered to THIS student - OK, continue
+          console.log(`✅ Device verified for student ${studentId}`);
+        }
+      } else {
+        console.log(`✅ Device ${deviceId.substring(0, 8)}... is available`);
+      }
+    }
+
+    // Now safe to get/create student
     let student = await Student.findOne({ studentId });
     
     if (!student) {
+      // New student - register device immediately
       student = new Student({
         studentId,
-        name: `Student ${studentId}`, // Temporary name
-        deviceId: deviceId || null
+        name: `Student ${studentId}`,
+        deviceId: deviceId || null,
+        deviceRegisteredAt: deviceId ? new Date() : null
       });
       await student.save();
-      console.log(`✨ Created new student: ${studentId}`);
+      console.log(`✨ Created new student: ${studentId} with device ${deviceId ? deviceId.substring(0, 8) + '...' : 'none'}`);
+    } else if (!student.deviceId && deviceId) {
+      // Existing student without device - register it now
+      student.deviceId = deviceId;
+      student.deviceRegisteredAt = new Date();
+      await student.save();
+      console.log(`🔒 Device ${deviceId.substring(0, 8)}... registered for existing student: ${studentId}`);
     }
 
-    // Device ID validation (if student has registered device)
+    // Final verification: ensure device matches
     if (student.deviceId && deviceId && student.deviceId !== deviceId) {
+      console.log(`❌ Device mismatch: Expected ${student.deviceId.substring(0, 8)}..., got ${deviceId.substring(0, 8)}...`);
       return res.status(403).json({
         error: 'Device mismatch',
         message: 'This account is linked to a different device'
       });
-    }
-
-    // Check if device is already registered to another student
-    if (!student.deviceId && deviceId) {
-      const existingDeviceUser = await Student.findOne({ 
-        deviceId,
-        studentId: { $ne: studentId } // Not this student
-      });
-      
-      if (existingDeviceUser) {
-        console.log(`❌ BLOCKED: Device ${deviceId} already locked to student ${existingDeviceUser.studentId}`);
-        return res.status(403).json({
-          error: 'Device already registered',
-          message: `This device is already linked to another student account (${existingDeviceUser.studentId})`
-        });
-      }
-      
-      // Device is free - register it to this student
-      student.deviceId = deviceId;
-      student.deviceRegisteredAt = new Date();
-      await student.save();
-      console.log(`🔒 Device registered for student: ${studentId}`);
     }
 
     // Check for existing attendance today
