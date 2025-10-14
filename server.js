@@ -121,8 +121,22 @@ app.post('/api/check-in', async (req, res) => {
       });
     }
 
-    // Register device if not set
+    // Check if device is already registered to another student
     if (!student.deviceId && deviceId) {
+      const existingDeviceUser = await Student.findOne({ 
+        deviceId,
+        studentId: { $ne: studentId } // Not this student
+      });
+      
+      if (existingDeviceUser) {
+        console.log(`❌ BLOCKED: Device ${deviceId} already locked to student ${existingDeviceUser.studentId}`);
+        return res.status(403).json({
+          error: 'Device already registered',
+          message: `This device is already linked to another student account (${existingDeviceUser.studentId})`
+        });
+      }
+      
+      // Device is free - register it to this student
       student.deviceId = deviceId;
       student.deviceRegisteredAt = new Date();
       await student.save();
