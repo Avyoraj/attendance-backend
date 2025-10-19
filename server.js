@@ -423,6 +423,77 @@ app.post('/api/attendance/cancel-provisional', async (req, res) => {
 });
 
 /**
+ * GET /api/attendance/today/:studentId
+ * Get today's attendance status for a specific student (all classes)
+ * Used for: App state synchronization on startup/login
+ * Returns: Array of today's attendance records with status and timing
+ */
+app.get('/api/attendance/today/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    if (!studentId) {
+      return res.status(400).json({ 
+        error: 'Missing studentId parameter'
+      });
+    }
+
+    const today = new Date();
+    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+    // Find all attendance records for today
+    const attendanceRecords = await Attendance.find({
+      studentId,
+      sessionDate
+    }).sort({ checkInTime: -1 }); // Most recent first
+
+    // Calculate remaining time for provisional records
+    const enrichedRecords = attendanceRecords.map(record => {
+      const result = {
+        attendanceId: record._id,
+        studentId: record.studentId,
+        classId: record.classId,
+        status: record.status,
+        checkInTime: record.checkInTime,
+        confirmedAt: record.confirmedAt,
+        sessionDate: record.sessionDate
+      };
+
+      // For provisional records, calculate remaining confirmation time
+      if (record.status === 'provisional' && record.checkInTime) {
+        const now = new Date();
+        const checkInTime = new Date(record.checkInTime);
+        const elapsedMs = now - checkInTime;
+        const confirmationDelayMs = 3 * 60 * 1000; // 3 minutes (matches app constant)
+        const remainingMs = confirmationDelayMs - elapsedMs;
+        
+        result.elapsedSeconds = Math.floor(elapsedMs / 1000);
+        result.remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+        result.shouldConfirm = remainingMs <= 0; // Backend should confirm this
+      }
+
+      return result;
+    });
+
+    console.log(`📊 Today's attendance for ${studentId}: ${enrichedRecords.length} records`);
+
+    res.status(200).json({
+      studentId,
+      date: sessionDate,
+      count: enrichedRecords.length,
+      attendance: enrichedRecords
+    });
+
+  } catch (error) {
+    console.error('❌ Get today attendance error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch today\'s attendance',
+      details: error.message 
+    });
+  }
+});
+
+/**
  * GET /api/attendance
  * Get attendance records (for dashboard)
  */
