@@ -467,13 +467,24 @@ app.post('/api/attendance/cancel-provisional', async (req, res) => {
     const today = new Date();
     const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-    // Delete provisional attendance only (not confirmed ones)
-    const result = await Attendance.findOneAndDelete({
-      studentId,
-      classId,
-      sessionDate,
-      status: 'provisional'
-    });
+    // 🔒 FIX: Update status to 'cancelled' instead of deleting
+    // This allows frontend to fetch and display cancelled state
+    const result = await Attendance.findOneAndUpdate(
+      {
+        studentId,
+        classId,
+        sessionDate,
+        status: 'provisional'
+      },
+      {
+        $set: {
+          status: 'cancelled',
+          cancelledAt: new Date(), // ✅ Matches model field name
+          cancellationReason: 'Student left classroom before confirmation period ended'
+        }
+      },
+      { new: true } // Return updated document
+    );
 
     if (!result) {
       return res.status(404).json({
@@ -485,13 +496,17 @@ app.post('/api/attendance/cancel-provisional', async (req, res) => {
     console.log(`🚫 Cancelled provisional attendance for ${studentId} in ${classId} (left before confirmation)`);
 
     res.status(200).json({
+      success: true,
       message: 'Provisional attendance cancelled successfully',
       reason: 'Student left classroom before confirmation period ended (out of beacon range)',
       cancelled: {
         studentId: result.studentId,
         classId: result.classId,
         checkInTime: result.checkInTime,
-        sessionDate: result.sessionDate
+        sessionDate: result.sessionDate,
+        status: result.status,
+        cancelledAt: result.cancelledAt,
+        cancellationReason: result.cancellationReason
       }
     });
 
