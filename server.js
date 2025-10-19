@@ -98,22 +98,19 @@ async function cleanupExpiredProvisional() {
     if (expiredRecords.length > 0) {
       console.log(`🧹 Found ${expiredRecords.length} expired provisional records`);
       
-      // Cancel each expired record
+      // 🗑️ DELETE each expired record (clean database)
       for (const record of expiredRecords) {
         const elapsedMinutes = Math.floor((now - record.checkInTime) / 1000 / 60);
         
-        console.log(`   ❌ Cancelling provisional: Student ${record.studentId}, Class ${record.classId}`);
+        console.log(`   🗑️ Deleting expired provisional: Student ${record.studentId}, Class ${record.classId}`);
         console.log(`      Reason: Expired after ${elapsedMinutes} minutes (limit: 3 min)`);
-        console.log(`      Likely: User logged out or lost connection during provisional period`);
+        console.log(`      Action: Removing from database (user never confirmed)`);
         
-        // Update to cancelled status
-        record.status = 'cancelled';
-        record.cancelledAt = now;
-        record.cancellationReason = `Auto-cancelled: Provisional period expired after ${elapsedMinutes} minutes without confirmation`;
-        await record.save();
+        // ✅ DELETE the record instead of marking as cancelled
+        await Attendance.deleteOne({ _id: record._id });
       }
       
-      console.log(`✅ Cleaned up ${expiredRecords.length} expired provisional records`);
+      console.log(`✅ Deleted ${expiredRecords.length} expired provisional records`);
     } else {
       // Only log every 10th cleanup to reduce noise
       if (Math.random() < 0.1) {

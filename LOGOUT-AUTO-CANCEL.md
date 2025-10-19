@@ -23,7 +23,7 @@
 
 ### **Backend Automatic Cleanup Service**
 
-I've implemented a **background cleanup service** that runs on the backend server every 5 minutes to automatically cancel expired provisional records.
+I've implemented a **background cleanup service** that runs on the backend server every 5 minutes to automatically **DELETE** expired provisional records (keeps database clean).
 
 #### **How It Works:**
 
@@ -60,9 +60,8 @@ User checks in
                     └─> Calculates: Elapsed = 5 minutes
                     └─> Threshold: 3 minutes
                     └─> Result: 5 > 3 → EXPIRED ❌
-                        └─> Auto-cancel with reason:
-                            "Auto-cancelled: Provisional period expired
-                             after 5 minutes without confirmation"
+                        └─> 🗑️ DELETE record from database
+                            (User never confirmed, so remove completely)
 ```
 
 ### **Implementation Details**
@@ -104,16 +103,13 @@ async function cleanupExpiredProvisional() {
         
         console.log(`   ❌ Cancelling provisional: Student ${record.studentId}, Class ${record.classId}`);
         console.log(`      Reason: Expired after ${elapsedMinutes} minutes (limit: 3 min)`);
-        console.log(`      Likely: User logged out or lost connection during provisional period`);
+        console.log(`      Action: Removing from database (user never confirmed)`);
         
-        // Update to cancelled status
-        record.status = 'cancelled';
-        record.cancelledAt = now;
-        record.cancellationReason = `Auto-cancelled: Provisional period expired after ${elapsedMinutes} minutes without confirmation`;
-        await record.save();
+        // ✅ DELETE the record instead of marking as cancelled
+        await Attendance.deleteOne({ _id: record._id });
       }
       
-      console.log(`✅ Cleaned up ${expiredRecords.length} expired provisional records`);
+      console.log(`✅ Deleted ${expiredRecords.length} expired provisional records`);
     }
   } catch (error) {
     console.error('❌ Error during provisional cleanup:', error.message);
@@ -288,9 +284,8 @@ Step 4: Wait 10 minutes (DON'T reopen app)
 Step 5: Check backend database
 
 ✅ EXPECTED:
-- Record status: "cancelled"
-- cancelledAt: ~5 minutes after checkInTime (next cleanup cycle)
-- cancellationReason: "Auto-cancelled: Provisional period expired..."
+- Record: **DELETED** (not found in database)
+- Database cleaned: No provisional record exists
 
 Query to check:
 db.attendances.findOne({ 
@@ -298,6 +293,7 @@ db.attendances.findOne({
   classId: "101",
   sessionDate: ISODate("2025-10-19")
 })
+// Should return: null (record deleted)
 ```
 
 ### **Test 2: Logout and Return Before Expiry**
@@ -363,13 +359,13 @@ Attendance.find({
 ### **Successful Cleanup Logs**
 ```
 🧹 Found 2 expired provisional records
-   ❌ Cancelling provisional: Student 0080, Class 101
+   🗑️ Deleting expired provisional: Student 0080, Class 101
       Reason: Expired after 5 minutes (limit: 3 min)
-      Likely: User logged out or lost connection during provisional period
-   ❌ Cancelling provisional: Student 0081, Class 102
+      Action: Removing from database (user never confirmed)
+   🗑️ Deleting expired provisional: Student 0081, Class 102
       Reason: Expired after 4 minutes (limit: 3 min)
-      Likely: User logged out or lost connection during provisional period
-✅ Cleaned up 2 expired provisional records
+      Action: Removing from database (user never confirmed)
+✅ Deleted 2 expired provisional records
 ```
 
 ### **No Cleanup Needed (occasional log)**
@@ -392,9 +388,10 @@ Attendance.find({
 
 ### **After Implementation:**
 - ✅ Automatic cleanup of abandoned records
-- ✅ Clear distinction: provisional → confirmed OR cancelled
-- ✅ Accurate attendance statistics
-- ✅ Clean database (no stale records)
+- ✅ Expired provisionals are **DELETED** (not just marked cancelled)
+- ✅ Clear distinction: provisional → confirmed OR deleted
+- ✅ Accurate attendance statistics (only confirmed = attended)
+- ✅ Clean database (no stale/cancelled records cluttering database)
 - ✅ Handles logout scenario correctly
 - ✅ Handles network failure scenario
 - ✅ Minimal performance impact
@@ -405,21 +402,22 @@ Attendance.find({
 
 **Answer:** 
 
-The attendance will be **automatically cancelled** by the backend cleanup service within 5 minutes of the confirmation window expiring. Here's the timeline:
+The attendance will be **automatically deleted** by the backend cleanup service within 5 minutes of the confirmation window expiring. Here's the timeline:
 
 1. **Check-in**: Provisional record created
 2. **Logout**: Timer stops (app not running)
 3. **3 minutes pass**: Confirmation window expires
 4. **Within 5 more minutes**: Backend cleanup detects expired record
-5. **Auto-cancel**: Status changed to "cancelled" with reason
-6. **Result**: ❌ Attendance NOT recorded
+5. **Auto-delete**: Record **removed from database** completely
+6. **Result**: ❌ Attendance NOT recorded (no trace in database)
 
 This ensures that:
 - ✅ Users can't game the system (check in and immediately leave)
 - ✅ Attendance is only recorded if user stays for full 3 minutes
-- ✅ Logout scenario is handled correctly (auto-cancel)
-- ✅ Network failure scenario is handled correctly (auto-cancel)
-- ✅ Database stays clean (no abandoned provisional records)
+- ✅ Logout scenario is handled correctly (auto-delete expired records)
+- ✅ Network failure scenario is handled correctly (auto-delete expired records)
+- ✅ Database stays clean (expired provisionals completely removed)
+- ✅ Only "confirmed" records = actual attendance (no cancelled clutter)
 
 **The system now properly handles all edge cases around provisional attendance!** 🎉
 
