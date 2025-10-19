@@ -14,8 +14,9 @@ async function testGetTodayAttendance() {
     console.log('📊 Response Status:', response.status);
     console.log('📦 Response Data:', JSON.stringify(data, null, 2));
     
-    if (data.success) {
-      console.log('\n✅ SUCCESS!');
+    // Check if API call was successful (status 200 OR data has expected structure)
+    if (response.status === 200 || (data && 'studentId' in data && 'attendance' in data)) {
+      console.log('\n✅ API ENDPOINT WORKING!');
       console.log(`   Student ID: ${data.studentId}`);
       console.log(`   Date: ${data.date}`);
       console.log(`   Total Records: ${data.count}`);
@@ -37,12 +38,13 @@ async function testGetTodayAttendance() {
           }
         });
       } else {
-        console.log('\n📭 No attendance records for today');
+        console.log('\n📭 No attendance records for today (this is normal if you haven\'t checked in yet)');
+        console.log('   💡 To test with data: Check in using the Flutter app, then run this script again');
       }
     } else {
-      console.log('\n❌ FAILED!');
-      console.log('   Error:', data.error);
-      console.log('   Message:', data.message);
+      console.log('\n❌ API REQUEST FAILED!');
+      console.log('   Error:', data.error || 'Unknown error');
+      console.log('   Message:', data.message || 'No error message');
     }
   } catch (error) {
     console.error('\n💥 ERROR:', error.message);

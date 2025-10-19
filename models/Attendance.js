@@ -20,7 +20,7 @@ const attendanceSchema = new mongoose.Schema({
   // Two-Step Attendance Support
   status: {
     type: String,
-    enum: ['provisional', 'confirmed', 'left_early', 'absent'],
+    enum: ['provisional', 'confirmed', 'cancelled', 'left_early', 'absent'], // 🎯 Added 'cancelled'
     default: 'provisional'
   },
   
@@ -32,6 +32,12 @@ const attendanceSchema = new mongoose.Schema({
   },
   confirmedAt: {
     type: Date // Set when status changes to 'confirmed'
+  },
+  cancelledAt: {
+    type: Date // 🎯 NEW: Set when status changes to 'cancelled'
+  },
+  cancellationReason: {
+    type: String // 🎯 NEW: Reason for cancellation
   },
   
   // Co-Location Detection Support

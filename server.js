@@ -60,6 +60,9 @@ const connectToMongoDB = async () => {
       }
     );
     console.log('✅ Device uniqueness index ensured');
+    
+    // 🎯 NEW: Start automatic cleanup of expired provisional records
+    startProvisionalCleanup();
 
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
@@ -67,6 +70,60 @@ const connectToMongoDB = async () => {
     throw error;
   }
 };
+
+// 🎯 NEW: Automatic cleanup of expired provisional attendance records
+// Runs every 5 minutes to cancel provisional records that exceeded the confirmation window
+function startProvisionalCleanup() {
+  console.log('🧹 Starting automatic provisional cleanup service...');
+  
+  // Run immediately on startup
+  cleanupExpiredProvisional();
+  
+  // Then run every 5 minutes
+  setInterval(cleanupExpiredProvisional, 5 * 60 * 1000);
+}
+
+async function cleanupExpiredProvisional() {
+  try {
+    const now = new Date();
+    const confirmationWindowMs = 3 * 60 * 1000; // 3 minutes
+    const expiryTime = new Date(now - confirmationWindowMs);
+    
+    // Find all provisional records older than 3 minutes
+    const expiredRecords = await Attendance.find({
+      status: 'provisional',
+      checkInTime: { $lt: expiryTime }
+    });
+    
+    if (expiredRecords.length > 0) {
+      console.log(`🧹 Found ${expiredRecords.length} expired provisional records`);
+      
+      // Cancel each expired record
+      for (const record of expiredRecords) {
+        const elapsedMinutes = Math.floor((now - record.checkInTime) / 1000 / 60);
+        
+        console.log(`   ❌ Cancelling provisional: Student ${record.studentId}, Class ${record.classId}`);
+        console.log(`      Reason: Expired after ${elapsedMinutes} minutes (limit: 3 min)`);
+        console.log(`      Likely: User logged out or lost connection during provisional period`);
+        
+        // Update to cancelled status
+        record.status = 'cancelled';
+        record.cancelledAt = now;
+        record.cancellationReason = `Auto-cancelled: Provisional period expired after ${elapsedMinutes} minutes without confirmation`;
+        await record.save();
+      }
+      
+      console.log(`✅ Cleaned up ${expiredRecords.length} expired provisional records`);
+    } else {
+      // Only log every 10th cleanup to reduce noise
+      if (Math.random() < 0.1) {
+        console.log('🧹 Cleanup check: No expired provisional records found');
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error during provisional cleanup:', error.message);
+  }
+}
 
 // Middleware to ensure DB connection
 const ensureConnection = async (req, res, next) => {
