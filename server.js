@@ -87,34 +87,62 @@ async function cleanupExpiredProvisional() {
   try {
     const now = new Date();
     const confirmationWindowMs = 3 * 60 * 1000; // 3 minutes
+    const classDurationMs = 60 * 60 * 1000; // 1 hour (class duration)
     const expiryTime = new Date(now - confirmationWindowMs);
     
-    // Find all provisional records older than 3 minutes
-    const expiredRecords = await Attendance.find({
+    // 1️⃣ Find and UPDATE provisional records older than 3 minutes → cancelled
+    const expiredProvisionals = await Attendance.find({
       status: 'provisional',
       checkInTime: { $lt: expiryTime }
     });
     
-    if (expiredRecords.length > 0) {
-      console.log(`🧹 Found ${expiredRecords.length} expired provisional records`);
+    if (expiredProvisionals.length > 0) {
+      console.log(`🧹 Found ${expiredProvisionals.length} expired provisional records`);
       
-      // 🗑️ DELETE each expired record (clean database)
-      for (const record of expiredRecords) {
+      // Mark as cancelled (keep for class duration)
+      for (const record of expiredProvisionals) {
         const elapsedMinutes = Math.floor((now - record.checkInTime) / 1000 / 60);
         
-        console.log(`   🗑️ Deleting expired provisional: Student ${record.studentId}, Class ${record.classId}`);
+        console.log(`   ❌ Marking as cancelled: Student ${record.studentId}, Class ${record.classId}`);
         console.log(`      Reason: Expired after ${elapsedMinutes} minutes (limit: 3 min)`);
-        console.log(`      Action: Removing from database (user never confirmed)`);
+        console.log(`      Action: Keeping for class duration (1 hour from check-in)`);
         
-        // ✅ DELETE the record instead of marking as cancelled
+        // Update to cancelled (don't delete yet)
+        record.status = 'cancelled';
+        record.cancelledAt = now;
+        record.cancellationReason = `Auto-cancelled: Provisional period expired after ${elapsedMinutes} minutes without confirmation`;
+        await record.save();
+      }
+      
+      console.log(`✅ Marked ${expiredProvisionals.length} records as cancelled`);
+    }
+    
+    // 2️⃣ Find and DELETE cancelled records older than 1 hour (class ended)
+    const classEndTime = new Date(now - classDurationMs);
+    const oldCancelledRecords = await Attendance.find({
+      status: 'cancelled',
+      checkInTime: { $lt: classEndTime }
+    });
+    
+    if (oldCancelledRecords.length > 0) {
+      console.log(`🗑️ Found ${oldCancelledRecords.length} old cancelled records (class ended)`);
+      
+      for (const record of oldCancelledRecords) {
+        const elapsedMinutes = Math.floor((now - record.checkInTime) / 1000 / 60);
+        
+        console.log(`   🗑️ Deleting old cancelled: Student ${record.studentId}, Class ${record.classId}`);
+        console.log(`      Reason: Class ended (${elapsedMinutes} minutes ago)`);
+        
         await Attendance.deleteOne({ _id: record._id });
       }
       
-      console.log(`✅ Deleted ${expiredRecords.length} expired provisional records`);
-    } else {
-      // Only log every 10th cleanup to reduce noise
+      console.log(`✅ Deleted ${oldCancelledRecords.length} old cancelled records`);
+    }
+    
+    // Log only occasionally if nothing to clean
+    if (expiredProvisionals.length === 0 && oldCancelledRecords.length === 0) {
       if (Math.random() < 0.1) {
-        console.log('🧹 Cleanup check: No expired provisional records found');
+        console.log('🧹 Cleanup check: No expired records found');
       }
     }
   } catch (error) {
