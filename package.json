@@ -17,13 +17,18 @@
   "license": "ISC",
   "description": "MongoDB-powered attendance backend with device locking and co-location detection",
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.8.3",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
+    "axios": "^1.12.2",
     "nodemon": "^3.1.7"
   },
   "engines": {

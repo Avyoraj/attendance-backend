@@ -2,6 +2,10 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 // Import models
@@ -9,8 +13,30 @@ const Student = require('./models/Student');
 const Attendance = require('./models/Attendance');
 const RSSIStream = require('./models/RSSIStream');
 const AnomalyFlag = require('./models/AnomalyFlag');
+const Teacher = require('./models/Teacher');
+const Class = require('./models/Class');
+const Admin = require('./models/Admin');
+
+// Import middleware
+const { authenticateTeacher, authenticateAdmin, authenticateUser } = require('./middleware/auth');
 
 const app = express();
+
+// Security middleware
+app.use(helmet());
+
+// Rate limiting
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 requests per windowMs for auth endpoints
+  message: 'Too many login attempts, please try again later.'
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per windowMs for other endpoints
+  message: 'Too many requests, please try again later.'
+});
 
 // Middleware
 app.use(cors());
@@ -169,7 +195,283 @@ const ensureConnection = async (req, res, next) => {
 app.use(ensureConnection);
 
 // ==========================================
-// 📍 CORE ENDPOINTS (Compatible with Flutter)
+// � AUTHENTICATION ENDPOINTS
+// ==========================================
+
+/**
+ * POST /api/teachers/register
+ * Register a new teacher account
+ */
+app.post('/api/teachers/register', authLimiter, async (req, res) => {
+  try {
+    const { name, email, password, department } = req.body;
+
+    // Validation
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, email, and password are required'
+      });
+    }
+
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Password strength
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    // Check if teacher already exists
+    const existingTeacher = await Teacher.findOne({ email: email.toLowerCase() });
+    if (existingTeacher) {
+      return res.status(409).json({
+        success: false,
+        message: 'Teacher with this email already exists'
+      });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(password, salt);
+
+    // Create teacher
+    const teacher = new Teacher({
+      name,
+      email: email.toLowerCase(),
+      password_hash,
+      department: department || 'General',
+      isVerified: false, // Can be verified by admin later
+      isActive: true
+    });
+
+    await teacher.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: teacher._id, email: teacher.email, role: 'teacher' },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    console.log(`✅ Teacher registered: ${teacher.email}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Teacher registered successfully',
+      data: {
+        token,
+        teacher: {
+          id: teacher._id,
+          name: teacher.name,
+          email: teacher.email,
+          department: teacher.department,
+          isVerified: teacher.isVerified
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Teacher registration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Registration failed. Please try again.',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/teachers/login
+ * Teacher login endpoint
+ */
+app.post('/api/teachers/login', authLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validation
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find teacher
+    const teacher = await Teacher.findOne({ email: email.toLowerCase() });
+    if (!teacher) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if active
+    if (!teacher.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been deactivated. Please contact admin.'
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, teacher.password_hash);
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: teacher._id, email: teacher.email, role: 'teacher' },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    console.log(`✅ Teacher logged in: ${teacher.email}`);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        token,
+        teacher: {
+          id: teacher._id,
+          name: teacher.name,
+          email: teacher.email,
+          department: teacher.department,
+          isVerified: teacher.isVerified
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Teacher login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Login failed. Please try again.',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/teachers/me
+ * Get current teacher profile (protected)
+ */
+app.get('/api/teachers/me', authenticateTeacher, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        teacher: {
+          id: req.teacher._id,
+          name: req.teacher.name,
+          email: req.teacher.email,
+          department: req.teacher.department,
+          isVerified: req.teacher.isVerified,
+          createdAt: req.teacher.createdAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get teacher profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch profile',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/admin/login
+ * Admin login endpoint
+ */
+app.post('/api/admin/login', authLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validation
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find admin
+    const admin = await Admin.findOne({ email: email.toLowerCase() });
+    if (!admin) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if active
+    if (!admin.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been deactivated.'
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, admin.password_hash);
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: admin._id, email: admin.email, role: 'admin' },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    console.log(`✅ Admin logged in: ${admin.email}`);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        token,
+        admin: {
+          id: admin._id,
+          name: admin.name,
+          email: admin.email,
+          role: admin.role
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Login failed. Please try again.',
+      error: error.message
+    });
+  }
+});
+
+// ==========================================
+// �📍 CORE ENDPOINTS (Compatible with Flutter)
 // ==========================================
 
 /**
@@ -905,6 +1207,181 @@ app.get('/api/students/:studentId', async (req, res) => {
 });
 
 // ==========================================
+// 📊 ADMIN & DASHBOARD ENDPOINTS
+// ==========================================
+
+/**
+ * GET /api/admin/overview
+ * Get comprehensive overview for admin dashboard
+ */
+app.get('/api/admin/overview', async (req, res) => {
+  try {
+    const [studentCount, attendanceCount, recentAttendance] = await Promise.all([
+      Student.countDocuments(),
+      Attendance.countDocuments(),
+      Attendance.find()
+        .sort({ checkInTime: -1 })
+        .limit(10)
+        .populate('studentId', 'studentId name')
+    ]);
+
+    // Calculate today's attendance
+    const today = new Date();
+    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const todayAttendance = await Attendance.countDocuments({
+      sessionDate,
+      status: 'confirmed'
+    });
+
+    res.status(200).json({
+      summary: {
+        studentCount,
+        classCount: 5, // Placeholder - you can add classes collection
+        attendanceCount,
+        todayAttendance
+      },
+      students: await Student.find().select('studentId name email deviceRegisteredAt'),
+      teachers: [], // Placeholder - you can add teachers collection
+      recentActivity: recentAttendance
+    });
+
+  } catch (error) {
+    console.error('❌ Admin overview error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch admin overview',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * GET /api/admin/student/:studentId
+ * Get detailed student information for admin
+ */
+app.get('/api/admin/student/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    const student = await Student.findOne({ studentId });
+    if (!student) {
+      return res.status(404).json({
+        error: 'Student not found'
+      });
+    }
+
+    // Get attendance history
+    const attendanceHistory = await Attendance.find({ studentId })
+      .sort({ checkInTime: -1 })
+      .limit(20);
+
+    // Calculate summary
+    const totalSessions = attendanceHistory.length;
+    const present = attendanceHistory.filter(a => a.status === 'confirmed').length;
+    const absent = totalSessions - present;
+
+    res.status(200).json({
+      student: {
+        id: student._id,
+        name: student.name,
+        email: student.email || '',
+        studentId: student.studentId,
+        year: student.year || '',
+        section: student.section || '',
+        deviceRegistered: !!student.deviceId,
+        deviceRegisteredAt: student.deviceRegisteredAt
+      },
+      classes: [], // Placeholder - you can add enrollment logic
+      attendance: attendanceHistory.map(a => ({
+        class_id: a.classId,
+        status: a.status === 'confirmed' ? 'present' : 'absent',
+        timestamp: a.checkInTime
+      })),
+      summary: {
+        totalSessions,
+        present,
+        absent
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Get student detail error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch student details',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * GET /api/classes
+ * Get all classes (placeholder for now)
+ */
+app.get('/api/classes', async (req, res) => {
+  try {
+    // Placeholder data - you can create a Classes collection
+    const classes = [
+      { id: 'CSE101', name: 'Computer Science 101', students: 30 },
+      { id: 'CSE102', name: 'Computer Science 102', students: 25 },
+      { id: 'CSE201', name: 'Data Structures', students: 28 },
+      { id: 'CSE301', name: 'Algorithms', students: 22 },
+      { id: 'CSE401', name: 'Machine Learning', students: 20 }
+    ];
+
+    res.status(200).json({
+      classes
+    });
+
+  } catch (error) {
+    console.error('❌ Get classes error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch classes',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * GET /api/attendance/:classId
+ * Get attendance for specific class
+ */
+app.get('/api/attendance/:classId', async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { date } = req.query;
+
+    let query = { classId };
+    
+    if (date) {
+      const queryDate = new Date(date);
+      const sessionDate = new Date(queryDate.getFullYear(), queryDate.getMonth(), queryDate.getDate());
+      query.sessionDate = sessionDate;
+    }
+
+    const attendance = await Attendance.find(query)
+      .sort({ checkInTime: -1 })
+      .populate('studentId', 'studentId name');
+
+    res.status(200).json({
+      attendance: attendance.map(a => ({
+        id: a._id,
+        student_id: a.studentId?.studentId || a.studentId,
+        student_name: a.studentId?.name || `Student ${a.studentId}`,
+        class_id: a.classId,
+        status: a.status === 'confirmed' ? 'present' : 'absent',
+        timestamp: a.checkInTime
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Get class attendance error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch class attendance',
+      details: error.message 
+    });
+  }
+});
+
+// ==========================================
 // 🏥 HEALTH CHECK
 // ==========================================
 
@@ -926,7 +1403,408 @@ app.get('/api/health', async (req, res) => {
 });
 
 // ==========================================
-// 🚀 SERVER STARTUP
+// � CLASS MANAGEMENT ENDPOINTS
+// ==========================================
+
+/**
+ * POST /api/classes
+ * Create a new class (protected - teachers only)
+ */
+app.post('/api/classes', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId, name, subject, schedule, students, beaconConfig, room, semester, academicYear } = req.body;
+
+    // Validation
+    if (!classId || !name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Class ID and name are required'
+      });
+    }
+
+    // Check if class already exists
+    const existingClass = await Class.findOne({ classId });
+    if (existingClass) {
+      return res.status(409).json({
+        success: false,
+        message: 'Class with this ID already exists'
+      });
+    }
+
+    // Create class
+    const newClass = new Class({
+      classId,
+      name,
+      subject,
+      teacherId: req.teacher._id,
+      schedule: schedule || {},
+      students: students || [],
+      beaconConfig: beaconConfig || {},
+      room,
+      semester,
+      academicYear,
+      isActive: true
+    });
+
+    await newClass.save();
+
+    console.log(`✅ Class created: ${classId} by ${req.teacher.email}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Class created successfully',
+      data: {
+        class: newClass
+      }
+    });
+
+  } catch (error) {
+    console.error('Create class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create class',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/classes
+ * Get all classes or filter by teacher
+ */
+app.get('/api/classes', authenticateTeacher, async (req, res) => {
+  try {
+    const { teacherId, isActive } = req.query;
+
+    // Build query
+    let query = {};
+    
+    // If teacherId provided, use it; otherwise use authenticated teacher's ID
+    if (teacherId) {
+      query.teacherId = teacherId;
+    } else {
+      query.teacherId = req.teacher._id;
+    }
+
+    if (isActive !== undefined) {
+      query.isActive = isActive === 'true';
+    }
+
+    const classes = await Class.find(query)
+      .populate('teacherId', 'name email department')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: {
+        classes,
+        count: classes.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Get classes error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch classes',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/classes/:classId
+ * Get a specific class by ID
+ */
+app.get('/api/classes/:classId', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+
+    const classDoc = await Class.findOne({ classId })
+      .populate('teacherId', 'name email department');
+
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    // Check if teacher owns this class
+    if (classDoc.teacherId._id.toString() !== req.teacher._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to access this class'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        class: classDoc
+      }
+    });
+
+  } catch (error) {
+    console.error('Get class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch class',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/classes/:classId
+ * Update a class (protected - owner only)
+ */
+app.put('/api/classes/:classId', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const updates = req.body;
+
+    // Find class
+    const classDoc = await Class.findOne({ classId });
+
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    // Check if teacher owns this class
+    if (classDoc.teacherId.toString() !== req.teacher._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to update this class'
+      });
+    }
+
+    // Prevent changing classId or teacherId
+    delete updates.classId;
+    delete updates.teacherId;
+
+    // Update class
+    Object.assign(classDoc, updates);
+    classDoc.updatedAt = Date.now();
+    await classDoc.save();
+
+    console.log(`✅ Class updated: ${classId} by ${req.teacher.email}`);
+
+    res.json({
+      success: true,
+      message: 'Class updated successfully',
+      data: {
+        class: classDoc
+      }
+    });
+
+  } catch (error) {
+    console.error('Update class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update class',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/classes/:classId
+ * Delete a class (protected - owner only)
+ * Soft delete by setting isActive to false
+ */
+app.delete('/api/classes/:classId', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { hardDelete } = req.query; // Optional: ?hardDelete=true
+
+    // Find class
+    const classDoc = await Class.findOne({ classId });
+
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    // Check if teacher owns this class
+    if (classDoc.teacherId.toString() !== req.teacher._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to delete this class'
+      });
+    }
+
+    if (hardDelete === 'true') {
+      // Hard delete (permanent)
+      await Class.deleteOne({ classId });
+      console.log(`❌ Class permanently deleted: ${classId} by ${req.teacher.email}`);
+      
+      res.json({
+        success: true,
+        message: 'Class permanently deleted'
+      });
+    } else {
+      // Soft delete (set inactive)
+      classDoc.isActive = false;
+      classDoc.updatedAt = Date.now();
+      await classDoc.save();
+
+      console.log(`🗑️ Class deactivated: ${classId} by ${req.teacher.email}`);
+
+      res.json({
+        success: true,
+        message: 'Class deactivated successfully',
+        data: {
+          class: classDoc
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error('Delete class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete class',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/classes/:classId/students
+ * Add students to a class
+ */
+app.post('/api/classes/:classId/students', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { studentIds } = req.body; // Array of student IDs
+
+    if (!Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'studentIds must be a non-empty array'
+      });
+    }
+
+    // Find class
+    const classDoc = await Class.findOne({ classId });
+
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    // Check if teacher owns this class
+    if (classDoc.teacherId.toString() !== req.teacher._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to modify this class'
+      });
+    }
+
+    // Add students (avoid duplicates)
+    const existingStudents = new Set(classDoc.students);
+    let addedCount = 0;
+
+    for (const studentId of studentIds) {
+      if (!existingStudents.has(studentId)) {
+        classDoc.students.push(studentId);
+        addedCount++;
+      }
+    }
+
+    classDoc.updatedAt = Date.now();
+    await classDoc.save();
+
+    console.log(`✅ Added ${addedCount} students to class ${classId}`);
+
+    res.json({
+      success: true,
+      message: `Added ${addedCount} students to class`,
+      data: {
+        class: classDoc
+      }
+    });
+
+  } catch (error) {
+    console.error('Add students error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to add students',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/classes/:classId/students/:studentId
+ * Remove a student from a class
+ */
+app.delete('/api/classes/:classId/students/:studentId', authenticateTeacher, async (req, res) => {
+  try {
+    const { classId, studentId } = req.params;
+
+    // Find class
+    const classDoc = await Class.findOne({ classId });
+
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    // Check if teacher owns this class
+    if (classDoc.teacherId.toString() !== req.teacher._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to modify this class'
+      });
+    }
+
+    // Remove student
+    const initialLength = classDoc.students.length;
+    classDoc.students = classDoc.students.filter(id => id !== studentId);
+
+    if (classDoc.students.length === initialLength) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found in this class'
+      });
+    }
+
+    classDoc.updatedAt = Date.now();
+    await classDoc.save();
+
+    console.log(`✅ Removed student ${studentId} from class ${classId}`);
+
+    res.json({
+      success: true,
+      message: 'Student removed from class',
+      data: {
+        class: classDoc
+      }
+    });
+
+  } catch (error) {
+    console.error('Remove student error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove student',
+      error: error.message
+    });
+  }
+});
+
+// ==========================================
+// �🚀 SERVER STARTUP
 // ==========================================
 
 // Vercel export
@@ -941,6 +1819,20 @@ if (process.env.VERCEL_ENV !== 'production') {
       app.listen(port, () => {
         console.log(`🚀 Server running on http://localhost:${port}`);
         console.log(`📡 API Endpoints:`);
+        console.log(`\n🔐 Authentication:`);
+        console.log(`   - POST /api/teachers/register`);
+        console.log(`   - POST /api/teachers/login`);
+        console.log(`   - GET  /api/teachers/me`);
+        console.log(`   - POST /api/admin/login`);
+        console.log(`\n📚 Class Management:`);
+        console.log(`   - POST   /api/classes`);
+        console.log(`   - GET    /api/classes`);
+        console.log(`   - GET    /api/classes/:classId`);
+        console.log(`   - PUT    /api/classes/:classId`);
+        console.log(`   - DELETE /api/classes/:classId`);
+        console.log(`   - POST   /api/classes/:classId/students`);
+        console.log(`   - DELETE /api/classes/:classId/students/:studentId`);
+        console.log(`\n📍 Student Attendance:`);
         console.log(`   - POST /api/check-in`);
         console.log(`   - POST /api/attendance/confirm`);
         console.log(`   - GET  /api/attendance`);
