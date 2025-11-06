@@ -64,15 +64,20 @@ app.use(ensureConnection);
 
 // Student routes
 app.use('/api/students', studentRoutes);
-app.use('/api/validate-device', studentRoutes);
+
+// Device validation (special route - used by Flutter app)
+app.post('/api/validate-device', require('./controllers/student.controller').validateDevice);
 
 // Attendance routes
 app.use('/api/attendance', attendanceRoutes);
-app.use('/api/check-in', attendanceRoutes);
+
+// Check-in (special route - used by Flutter app)
+app.post('/api/check-in', require('./controllers/attendance.controller').checkIn);
 
 // RSSI routes
-app.use('/api/check-in', rssiRoutes);
 app.use('/api/rssi-streams', rssiRoutes);
+app.post('/api/stream', require('./controllers/rssi.controller').uploadStream);
+app.post('/api/analyze', require('./controllers/rssi.controller').analyzeCorrelations);
 
 // Anomaly routes
 app.use('/api/anomalies', anomalyRoutes);
