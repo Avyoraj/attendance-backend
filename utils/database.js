@@ -16,13 +16,18 @@ let cachedConnection = null;
 async function connectToMongoDB() {
   // Check if mongoose is already connected
   if (mongoose.connection.readyState === 1) {
-    console.log('✅ Using existing MongoDB connection');
+    // Only log in development to reduce Vercel log noise
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('✅ Using existing MongoDB connection');
+    }
     return mongoose.connection;
   }
 
   // Check if we have a cached connection
   if (cachedConnection) {
-    console.log('✅ Using cached MongoDB connection');
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('✅ Using cached MongoDB connection');
+    }
     return cachedConnection;
   }
 

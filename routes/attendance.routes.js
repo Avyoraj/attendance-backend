@@ -1,21 +1,14 @@
 /**
  * ✅ Attendance Routes
  * 
- * Endpoints for attendance check-in, confirmation, and queries
+ * Endpoints for attendance queries and management
+ * Note: /check-in, /confirm, /cancel-provisional are registered as direct routes in server.js
+ * to match Flutter app's expected paths (/api/check-in vs /api/attendance/check-in)
  */
 
 const express = require('express');
 const router = express.Router();
 const attendanceController = require('../controllers/attendance.controller');
-
-// Check-in (provisional)
-router.post('/check-in', attendanceController.checkIn);
-
-// Confirm attendance
-router.post('/confirm', attendanceController.confirmAttendance);
-
-// Cancel provisional attendance
-router.post('/cancel-provisional', attendanceController.cancelProvisional);
 
 // Get today's attendance for student
 router.get('/today/:studentId', attendanceController.getTodayAttendance);
