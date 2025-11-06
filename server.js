@@ -177,40 +177,47 @@ async function cleanupExpiredProvisional() {
 
 const PORT = process.env.PORT || 3000;
 
-async function startServer() {
-  try {
-    // Connect to MongoDB
-    await connectToMongoDB();
-    
-    // Ensure indexes
-    await Student.collection.createIndex(
-      { deviceId: 1 }, 
-      { unique: true, sparse: true, name: 'deviceId_unique_idx' }
-    );
-    console.log('✅ Device uniqueness index ensured');
-    
-    // Start cleanup jobs
-    startProvisionalCleanup();
-    
-    // Start server
-    app.listen(PORT, () => {
-      console.log('\n' + '='.repeat(60));
-      console.log('🚀 ATTENDANCE SYSTEM BACKEND - RUNNING');
-      console.log('='.repeat(60));
-      console.log(`📡 Server: http://localhost:${PORT}`);
-      console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
-      console.log(`📊 Dashboard: http://localhost:${PORT}/`);
-      console.log('='.repeat(60) + '\n');
-    });
+// For Vercel serverless deployment, export app directly
+if (process.env.VERCEL) {
+  console.log('🔧 Running in Vercel serverless mode');
+  module.exports = app;
+} else {
+  // For local development, start traditional server
+  async function startServer() {
+    try {
+      // Connect to MongoDB
+      await connectToMongoDB();
+      
+      // Ensure indexes
+      await Student.collection.createIndex(
+        { deviceId: 1 }, 
+        { unique: true, sparse: true, name: 'deviceId_unique_idx' }
+      );
+      console.log('✅ Device uniqueness index ensured');
+      
+      // Start cleanup jobs
+      startProvisionalCleanup();
+      
+      // Start server
+      app.listen(PORT, () => {
+        console.log('\n' + '='.repeat(60));
+        console.log('🚀 ATTENDANCE SYSTEM BACKEND - RUNNING');
+        console.log('='.repeat(60));
+        console.log(`📡 Server: http://localhost:${PORT}`);
+        console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
+        console.log(`📊 Dashboard: http://localhost:${PORT}/`);
+        console.log('='.repeat(60) + '\n');
+      });
 
-  } catch (error) {
-    console.error('💥 Failed to start server:', error);
-    process.exit(1);
+    } catch (error) {
+      console.error('💥 Failed to start server:', error);
+      process.exit(1);
+    }
   }
+
+  // Start the server
+  startServer();
+
+  // Export for testing
+  module.exports = app;
 }
-
-// Start the server
-startServer();
-
-// Export for testing
-module.exports = app;
