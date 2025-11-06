@@ -168,7 +168,7 @@ exports.checkIn = async (req, res) => {
  */
 exports.confirmAttendance = async (req, res) => {
   try {
-    const { studentId, classId } = req.body;
+    const { studentId, classId, attendanceId } = req.body;
 
     if (!studentId || !classId) {
       return res.status(400).json({ 
@@ -180,25 +180,48 @@ exports.confirmAttendance = async (req, res) => {
     const today = new Date();
     const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-    const attendance = await Attendance.findOne({
-      studentId,
-      classId,
-      sessionDate,
-      status: 'provisional'
-    });
-
-    if (!attendance) {
-      return res.status(404).json({
-        error: 'No provisional attendance found',
-        message: 'Cannot confirm attendance that does not exist or is already confirmed'
+    // FIX #2: Support direct lookup by attendance ID (more reliable)
+    let attendance;
+    if (attendanceId) {
+      // Direct lookup by ID (fast, accurate)
+      attendance = await Attendance.findById(attendanceId);
+      
+      if (!attendance) {
+        return res.status(404).json({
+          error: 'No provisional attendance found',
+          message: 'Attendance ID not found'
+        });
+      }
+      
+      // Verify it's for the right student/class
+      if (attendance.studentId !== studentId || attendance.classId !== classId) {
+        return res.status(400).json({
+          error: 'Attendance mismatch',
+          message: 'Attendance ID does not match student/class'
+        });
+      }
+    } else {
+      // Fallback: Search by student/class/date (slower, less reliable)
+      attendance = await Attendance.findOne({
+        studentId,
+        classId,
+        sessionDate,
+        status: 'provisional'
       });
+      
+      if (!attendance) {
+        return res.status(404).json({
+          error: 'No provisional attendance found',
+          message: 'Cannot confirm attendance that does not exist or is already confirmed'
+        });
+      }
     }
 
     attendance.status = 'confirmed';
     attendance.confirmedAt = new Date();
     await attendance.save();
 
-    console.log(`✅ Attendance confirmed: ${studentId} in ${classId}`);
+    console.log(`✅ Attendance confirmed: ${studentId} in ${classId} (ID: ${attendance._id})`);
 
     res.status(200).json({
       message: 'Attendance confirmed successfully',
