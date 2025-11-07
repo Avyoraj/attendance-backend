@@ -12,7 +12,9 @@ const Student = require('../models/Student');
  */
 exports.checkIn = async (req, res) => {
   try {
-    const { studentId, classId, deviceId, rssi, distance, beaconMajor, beaconMinor } = req.body;
+    // Accept both deviceIdHash (preferred) and deviceId (legacy)
+    const { studentId, classId, deviceIdHash, deviceId: legacyDeviceId, rssi, distance, beaconMajor, beaconMinor } = req.body;
+    const deviceId = deviceIdHash || legacyDeviceId || null;
 
     // Validation
     if (!studentId || !classId) {
@@ -39,7 +41,8 @@ exports.checkIn = async (req, res) => {
           // Registered to DIFFERENT student - BLOCK
           console.log(`❌ BLOCKED: Device ${deviceId.substring(0, 8)}... is locked to student ${existingDeviceUser.studentId}`);
           return res.status(403).json({
-            error: 'Device already registered',
+            success: false,
+            error: 'DEVICE_MISMATCH',
             message: `This device is already linked to another student account (${existingDeviceUser.studentId})`,
             lockedToStudent: existingDeviceUser.studentId,
             lockedSince: existingDeviceUser.deviceRegisteredAt
@@ -65,7 +68,7 @@ exports.checkIn = async (req, res) => {
         deviceRegisteredAt: deviceId ? new Date() : null
       });
       await student.save();
-      console.log(`✨ Created new student: ${studentId} with device ${deviceId ? deviceId.substring(0, 8) + '...' : 'none'}`);
+  console.log(`✨ Created new student: ${studentId} with device ${deviceId ? deviceId.substring(0, 8) + '...' : 'none'}`);
     } else if (!student.deviceId && deviceId) {
       // Existing student without device - register it now
       student.deviceId = deviceId;
@@ -78,7 +81,8 @@ exports.checkIn = async (req, res) => {
     if (student.deviceId && deviceId && student.deviceId !== deviceId) {
       console.log(`❌ Device mismatch: Expected ${student.deviceId.substring(0, 8)}..., got ${deviceId.substring(0, 8)}...`);
       return res.status(403).json({
-        error: 'Device mismatch',
+        success: false,
+        error: 'DEVICE_MISMATCH',
         message: 'This account is linked to a different device'
       });
     }
@@ -101,13 +105,26 @@ exports.checkIn = async (req, res) => {
       }
       
       await attendance.save();
-      
+
+      // Compute remainingSeconds for confirmation window when provisional
+      const confirmationWindowSeconds = 3 * 60; // keep in sync with client/docs
+      const now = new Date();
+      let remainingSeconds = 0;
+      if (attendance.status === 'provisional' && attendance.checkInTime) {
+        const elapsedSeconds = Math.floor((now.getTime() - attendance.checkInTime.getTime()) / 1000);
+        remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
+      }
+
       return res.status(200).json({
+        success: true,
         message: 'Attendance updated',
         status: attendance.status,
         alreadyMarked: true,
+        remainingSeconds,
         attendance: {
           id: attendance._id,
+          studentId: attendance.studentId,
+          classId: attendance.classId,
           status: attendance.status,
           checkInTime: attendance.checkInTime,
           confirmedAt: attendance.confirmedAt
@@ -132,9 +149,13 @@ exports.checkIn = async (req, res) => {
 
     console.log(`✅ Attendance marked: ${studentId} in ${classId} (${attendance.status})`);
 
+    // Remaining seconds for confirmation window
+    const confirmationWindowSeconds = 3 * 60;
     res.status(201).json({
+      success: true,
       message: 'Attendance recorded successfully',
       status: 'provisional',
+      remainingSeconds: confirmationWindowSeconds,
       attendance: {
         id: attendance._id,
         studentId: attendance.studentId,
@@ -148,15 +169,45 @@ exports.checkIn = async (req, res) => {
   } catch (error) {
     console.error('❌ Check-in error:', error);
     
-    // Handle duplicate key error
+    // Handle duplicate key error idempotently: return existing record as success 200
     if (error.code === 11000) {
-      return res.status(409).json({
-        error: 'Duplicate attendance',
-        message: 'Attendance already marked for this class today'
-      });
+      try {
+        const today = new Date();
+        const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        const { studentId, classId } = req.body;
+        const existing = await Attendance.findOne({ studentId, classId, sessionDate });
+        if (existing) {
+          const confirmationWindowSeconds = 3 * 60;
+          const now = new Date();
+          let remainingSeconds = 0;
+          if (existing.status === 'provisional' && existing.checkInTime) {
+            const elapsedSeconds = Math.floor((now.getTime() - existing.checkInTime.getTime()) / 1000);
+            remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
+          }
+          return res.status(200).json({
+            success: true,
+            message: 'Attendance already recorded',
+            status: existing.status,
+            alreadyMarked: true,
+            remainingSeconds,
+            attendance: {
+              id: existing._id,
+              studentId: existing.studentId,
+              classId: existing.classId,
+              status: existing.status,
+              checkInTime: existing.checkInTime,
+              confirmedAt: existing.confirmedAt
+            }
+          });
+        }
+      } catch (e2) {
+        console.error('❌ Idempotent fallback failed:', e2);
+      }
+      return res.status(200).json({ success: true, message: 'Attendance already recorded' });
     }
     
     res.status(500).json({ 
+      success: false,
       error: 'Failed to record attendance',
       details: error.message 
     });
@@ -224,6 +275,7 @@ exports.confirmAttendance = async (req, res) => {
     console.log(`✅ Attendance confirmed: ${studentId} in ${classId} (ID: ${attendance._id})`);
 
     res.status(200).json({
+      success: true,
       message: 'Attendance confirmed successfully',
       attendance: {
         id: attendance._id,
@@ -236,6 +288,7 @@ exports.confirmAttendance = async (req, res) => {
   } catch (error) {
     console.error('❌ Confirmation error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to confirm attendance',
       details: error.message 
     });
@@ -287,6 +340,7 @@ exports.cancelProvisional = async (req, res) => {
     console.log(`🚫 Cancelled provisional attendance for ${studentId} in ${classId}`);
 
     res.status(200).json({
+      success: true,
       message: 'Provisional attendance cancelled',
       attendance: {
         id: result._id,
@@ -298,6 +352,7 @@ exports.cancelProvisional = async (req, res) => {
   } catch (error) {
     console.error('❌ Cancel error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to cancel attendance',
       details: error.message 
     });
@@ -317,17 +372,68 @@ exports.getTodayAttendance = async (req, res) => {
     const attendance = await Attendance.find({
       studentId,
       sessionDate
+    }).sort({ checkInTime: -1 });
+
+    const confirmationWindowSeconds = 3 * 60; // 3 minutes
+    const cooldownWindowMinutes = 15;
+    const now = new Date();
+
+    const formattedAttendance = attendance.map(record => {
+      const checkInTime = record.checkInTime;
+      const confirmedAt = record.confirmedAt;
+      const cancelledAt = record.cancelledAt;
+
+      const base = {
+        attendanceId: record._id.toString(),
+        studentId: record.studentId,
+        classId: record.classId,
+        status: record.status,
+        checkInTime: checkInTime ? checkInTime.toISOString() : null,
+        confirmedAt: confirmedAt ? confirmedAt.toISOString() : null,
+        cancelledAt: cancelledAt ? cancelledAt.toISOString() : null,
+        cancellationReason: record.cancellationReason || null,
+        deviceId: record.deviceId,
+        rssi: record.rssi,
+        distance: record.distance,
+        beaconMajor: record.beaconMajor,
+        beaconMinor: record.beaconMinor,
+      };
+
+      if (record.status === 'provisional' && checkInTime) {
+        const elapsedSeconds = Math.floor((now.getTime() - checkInTime.getTime()) / 1000);
+        const remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
+        base.remainingSeconds = remainingSeconds;
+        base.confirmationExpiresAt = new Date(checkInTime.getTime() + confirmationWindowSeconds * 1000).toISOString();
+      }
+
+      if (record.status === 'confirmed') {
+        const referenceTime = confirmedAt || checkInTime;
+        if (referenceTime) {
+          const cooldownEndsAt = new Date(referenceTime.getTime() + cooldownWindowMinutes * 60 * 1000);
+          const secondsRemaining = Math.max(Math.floor((cooldownEndsAt.getTime() - now.getTime()) / 1000), 0);
+          base.cooldown = {
+            minutesRemaining: Math.max(Math.ceil(secondsRemaining / 60), 0),
+            secondsRemaining,
+            cooldownEndsAt: cooldownEndsAt.toISOString(),
+          };
+        }
+      }
+
+      return base;
     });
 
     res.status(200).json({
-      date: sessionDate,
-      count: attendance.length,
-      attendance
+      success: true,
+      studentId,
+      date: sessionDate.toISOString(),
+      count: formattedAttendance.length,
+      attendance: formattedAttendance,
     });
 
   } catch (error) {
     console.error('❌ Get today attendance error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch attendance',
       details: error.message 
     });

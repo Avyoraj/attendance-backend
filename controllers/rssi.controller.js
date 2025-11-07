@@ -12,7 +12,7 @@ const { analyzeCorrelations } = require('../scripts/analyze-correlations');
  */
 exports.uploadStream = async (req, res) => {
   try {
-    const { studentId, classId, rssiData } = req.body;
+    const { studentId, classId, rssiData, sessionDate: sessionDateInput } = req.body;
 
     if (!studentId || !classId || !rssiData || !Array.isArray(rssiData)) {
       return res.status(400).json({ 
@@ -21,8 +21,15 @@ exports.uploadStream = async (req, res) => {
       });
     }
 
-    const today = new Date();
-    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    // Use provided sessionDate if present, else default to today
+    let sessionDate;
+    if (sessionDateInput) {
+      const d = new Date(sessionDateInput);
+      sessionDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    } else {
+      const today = new Date();
+      sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    }
 
     // Find or create RSSI stream
     let stream = await RSSIStream.findOne({
@@ -52,6 +59,7 @@ exports.uploadStream = async (req, res) => {
     console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${stream.totalReadings} readings)`);
 
     res.status(200).json({
+      success: true,
       message: 'RSSI data recorded',
       totalReadings: stream.totalReadings,
       streamId: stream._id
@@ -60,6 +68,7 @@ exports.uploadStream = async (req, res) => {
   } catch (error) {
     console.error('❌ RSSI stream error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to record RSSI data',
       details: error.message 
     });
@@ -90,6 +99,7 @@ exports.getStreams = async (req, res) => {
       .limit(parseInt(limit));
 
     res.status(200).json({
+      success: true,
       count: streams.length,
       streams
     });
@@ -97,6 +107,7 @@ exports.getStreams = async (req, res) => {
   } catch (error) {
     console.error('❌ Get RSSI streams error:', error);
     res.status(500).json({ 
+      success: false,
       error: 'Failed to fetch RSSI streams',
       details: error.message 
     });

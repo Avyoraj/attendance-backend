@@ -75,6 +75,8 @@ app.post('/api/check-in/stream', require('./controllers/rssi.controller').upload
 // Attendance management routes (special routes - match Flutter app paths)
 app.post('/api/attendance/confirm', require('./controllers/attendance.controller').confirmAttendance);
 app.post('/api/attendance/cancel-provisional', require('./controllers/attendance.controller').cancelProvisional);
+// Alias for RSSI stream under attendance namespace (keeps old path too)
+app.post('/api/attendance/rssi-stream', require('./controllers/rssi.controller').uploadStream);
 
 // Attendance query routes
 app.use('/api/attendance', attendanceRoutes);
