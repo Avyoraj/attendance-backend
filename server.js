@@ -17,6 +17,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
+const cron = require('node-cron');
 
 // Database connection
 const { connectToMongoDB, ensureConnection } = require('./utils/database');
@@ -30,6 +31,7 @@ const studentRoutes = require('./routes/student.routes');
 const attendanceRoutes = require('./routes/attendance.routes');
 const rssiRoutes = require('./routes/rssi.routes');
 const anomalyRoutes = require('./routes/anomaly.routes');
+const reportsRoutes = require('./routes/reports.routes');
 
 const app = express();
 
@@ -40,7 +42,9 @@ const app = express();
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+// Serve static assets at both / and /public for compatibility (local and Vercel)
 app.use(express.static('public'));
+app.use('/public', express.static('public'));
 
 // Rate limiting
 const authLimiter = rateLimit({
@@ -87,6 +91,9 @@ app.post('/api/analyze', require('./controllers/rssi.controller').analyzeCorrela
 
 // Anomaly routes
 app.use('/api/anomalies', anomalyRoutes);
+
+// Reports routes
+app.use('/api/reports', reportsRoutes);
 
 // ==========================================
 // 🏥 HEALTH CHECK
@@ -208,6 +215,25 @@ if (process.env.VERCEL) {
       
       // Start cleanup jobs
       startProvisionalCleanup();
+
+      // Schedule correlation analysis (every 30 minutes, 8:00–20:00 daily)
+      try {
+        cron.schedule('0,30 8-20 * * *', async () => {
+          try {
+            console.log('⏱️  Running scheduled correlation analysis...');
+            // Lazy import to avoid startup overhead
+            const { analyzeCorrelations } = require('./scripts/analyze-correlations');
+            await analyzeCorrelations();
+          } catch (err) {
+            console.error('❌ Scheduled correlation run failed:', err.message);
+          }
+        }, {
+          timezone: 'Etc/UTC'
+        });
+        console.log('✅ Scheduled correlation analysis job (every 30 min, 08:00–20:00 UTC)');
+      } catch (e) {
+        console.error('⚠️ Failed to schedule correlation job:', e.message);
+      }
       
       // Start server
       app.listen(PORT, () => {

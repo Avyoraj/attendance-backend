@@ -1,42 +1,28 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const path = require('path');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+/**
+ * DEPRECATED FILE: server-old.js
+ * ------------------------------------------------------------
+ * This legacy monolithic Express server implementation has been
+ * superseded by the refactored modular server (server.js and the
+ * controllers/, routes/, services/ structure).
+ *
+ * It has intentionally been reduced to this stub because direct
+ * deletion via the automated patch tooling was unsuccessful in
+ * this environment. Retaining a tiny stub avoids accidental
+ * resurrection of outdated logic while keeping version control
+ * history intact for archeology.
+ *
+ * ACTION: Remove this file entirely in a subsequent commit once
+ * filesystem constraints allow, and ensure any references in docs
+ * are updated (e.g. CLEANUP_AND_FOLDER_STRUCTURE.md, ISSUES_BREAKDOWN.md).
+ */
 
-// Import models
-const Student = require('./models/Student');
-const Attendance = require('./models/Attendance');
-const RSSIStream = require('./models/RSSIStream');
-const AnomalyFlag = require('./models/AnomalyFlag');
-const Teacher = require('./models/Teacher');
-const Class = require('./models/Class');
-const Admin = require('./models/Admin');
+console.warn('[server-old.js] This legacy file is deprecated and contains no runtime logic. Use server.js instead.');
 
-// Import middleware
-const { authenticateTeacher, authenticateAdmin, authenticateUser } = require('./middleware/auth');
+module.exports = {}; // No-op export.
 
-const app = express();
-
-// Security middleware
-app.use(helmet());
-
-// Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per windowMs for auth endpoints
-  message: 'Too many login attempts, please try again later.'
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per windowMs for other endpoints
-  message: 'Too many requests, please try again later.'
-});
+if (false) {
+// LEGACY BELOW IS DISABLED - kept for archeology
+// ------------------------------------------------
 
 // Middleware
 app.use(cors());
@@ -1846,4 +1832,5 @@ if (process.env.VERCEL_ENV !== 'production') {
       console.error('Failed to start server:', error);
       process.exit(1);
     });
+}
 }

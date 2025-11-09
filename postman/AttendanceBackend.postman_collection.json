@@ -1,0 +1,261 @@
+{
+  "info": {
+    "_postman_id": "a4a4d6b6-7a2f-4c1a-9a34-2c0f8ce7b9c1",
+    "name": "Attendance Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Postman collection for Attendance Backend APIs"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/health"
+      }
+    },
+    {
+      "name": "Dashboard (HTML)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/"
+      }
+    },
+    {
+      "name": "Students",
+      "item": [
+        {
+          "name": "Validate Device",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"studentId\": \"{{studentId}}\",\n  \"deviceId\": \"{{deviceId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/validate-device"
+          }
+        },
+        {
+          "name": "Get Student By Id (if implemented)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/students/{{studentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","students","{{studentId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attendance",
+      "item": [
+        {
+          "name": "Check-in (Provisional)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"studentId\": \"{{studentId}}\",\n  \"classId\": \"{{classId}}\",\n  \"deviceId\": \"{{deviceId}}\",\n  \"rssi\": -55\n}"
+            },
+            "url": "{{baseUrl}}/api/check-in"
+          }
+        },
+        {
+          "name": "Confirm Attendance",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"attendanceId\": \"{{attendanceId}}\",\n  \"studentId\": \"{{studentId}}\",\n  \"classId\": \"{{classId}}\",\n  \"rssi\": -50\n}"
+            },
+            "url": "{{baseUrl}}/api/attendance/confirm"
+          }
+        },
+        {
+          "name": "Cancel Provisional",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"attendanceId\": \"{{attendanceId}}\",\n  \"studentId\": \"{{studentId}}\",\n  \"classId\": \"{{classId}}\",\n  \"reason\": \"student_left\"\n}"
+            },
+            "url": "{{baseUrl}}/api/attendance/cancel-provisional"
+          }
+        },
+        {
+          "name": "Query Attendance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/attendance?studentId={{studentId}}&classId={{classId}}&date={{date}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","attendance"],
+              "query": [
+                {"key": "studentId", "value": "{{studentId}}"},
+                {"key": "classId", "value": "{{classId}}"},
+                {"key": "date", "value": "{{date}}"}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "RSSI",
+      "item": [
+        {
+          "name": "Upload RSSI Stream (/api/check-in/stream)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"studentId\": \"{{studentId}}\",\n  \"classId\": \"{{classId}}\",\n  \"sessionDate\": \"{{sessionDate}}\",\n  \"rssiData\": [\n    {\"timestamp\": \"{{sessionDate}}\", \"rssi\": -55},\n    {\"timestamp\": \"{{sessionDatePlus5}}\", \"rssi\": -54}\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/check-in/stream"
+          }
+        },
+        {
+          "name": "Upload RSSI Stream (alias /api/attendance/rssi-stream)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"studentId\": \"{{studentId}}\",\n  \"classId\": \"{{classId}}\",\n  \"sessionDate\": \"{{sessionDate}}\",\n  \"rssiData\": [\n    {\"timestamp\": \"{{sessionDate}}\", \"rssi\": -55},\n    {\"timestamp\": \"{{sessionDatePlus5}}\", \"rssi\": -54}\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/attendance/rssi-stream"
+          }
+        },
+        {
+          "name": "Analyze Correlations (manual trigger)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/analyze"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reports",
+      "item": [
+        {
+          "name": "Correlation Report (last 24h)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/reports/attendance-correlation"
+          }
+        },
+        {
+          "name": "Correlation Report (by date)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/attendance-correlation?date={{date}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","reports","attendance-correlation"],
+              "query": [{"key":"date","value":"{{date}}"}]
+            }
+          }
+        },
+        {
+          "name": "Correlation Report (class + date)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/attendance-correlation?classId={{classId}}&date={{date}}&minReadings=10&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","reports","attendance-correlation"],
+              "query": [
+                {"key":"classId","value":"{{classId}}"},
+                {"key":"date","value":"{{date}}"},
+                {"key":"minReadings","value":"10"},
+                {"key":"limit","value":"10"}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Anomalies",
+      "item": [
+        {
+          "name": "List Anomalies",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/anomalies"
+          }
+        },
+        {
+          "name": "Create Anomaly",
+          "request": {
+            "method": "POST",
+            "header": [ {"key":"Content-Type","value":"application/json"} ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"classId\": \"{{classId}}\",\n  \"sessionDate\": \"{{sessionDate}}\",\n  \"flaggedUsers\": [\"{{studentId}}\", \"S_OTHER\"],\n  \"correlationScore\": 0.96,\n  \"severity\": \"high\"\n}"
+            },
+            "url": "{{baseUrl}}/api/anomalies"
+          }
+        },
+        {
+          "name": "Update Anomaly Status",
+          "request": {
+            "method": "PUT",
+            "header": [ {"key":"Content-Type","value":"application/json"} ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"reviewed\",\n  \"reviewedBy\": \"admin1\",\n  \"reviewNotes\": \"Manual check\"\n}"
+            },
+            "url": "{{baseUrl}}/api/anomalies/{{anomalyId}}"
+          }
+        },
+        {
+          "name": "Anomaly Statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/anomalies/statistics?classId={{classId}}&startDate={{date}}&endDate={{date}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","anomalies","statistics"],
+              "query": [
+                {"key":"classId","value":"{{classId}}"},
+                {"key":"startDate","value":"{{date}}"},
+                {"key":"endDate","value":"{{date}}"}
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "event": []
+}

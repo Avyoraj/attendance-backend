@@ -219,7 +219,8 @@ exports.checkIn = async (req, res) => {
  */
 exports.confirmAttendance = async (req, res) => {
   try {
-    const { studentId, classId, attendanceId } = req.body;
+    const { studentId, classId, attendanceId, deviceIdHash, deviceId: legacyDeviceId } = req.body;
+    const deviceId = deviceIdHash || legacyDeviceId || null;
 
     if (!studentId || !classId) {
       return res.status(400).json({ 
@@ -231,7 +232,7 @@ exports.confirmAttendance = async (req, res) => {
     const today = new Date();
     const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-    // FIX #2: Support direct lookup by attendance ID (more reliable)
+  // FIX #2: Support direct lookup by attendance ID (more reliable)
     let attendance;
     if (attendanceId) {
       // Direct lookup by ID (fast, accurate)
@@ -268,7 +269,48 @@ exports.confirmAttendance = async (req, res) => {
       }
     }
 
-    attendance.status = 'confirmed';
+    // 🔒 Enforce device binding at confirmation time (defense-in-depth)
+    if (deviceId) {
+      const student = await Student.findOne({ studentId });
+      if (!student) {
+        return res.status(404).json({ error: 'Student not found' });
+      }
+
+      // If student has a registered device, it must match
+      if (student.deviceId && student.deviceId !== deviceId) {
+        console.log(`❌ Device mismatch on confirm: expected ${student.deviceId.substring(0,8)}..., got ${deviceId.substring(0,8)}...`);
+        return res.status(403).json({
+          success: false,
+          error: 'DEVICE_MISMATCH',
+          message: 'This account is linked to a different device'
+        });
+      }
+
+      // If attendance record has deviceId, it must match as well
+      if (attendance.deviceId && attendance.deviceId !== deviceId) {
+        console.log(`❌ Attendance/device mismatch on confirm: attendance=${attendance.deviceId.substring(0,8)}... got=${deviceId.substring(0,8)}...`);
+        return res.status(403).json({
+          success: false,
+          error: 'DEVICE_MISMATCH',
+          message: 'Confirm request device does not match original check-in device'
+        });
+      }
+
+      // If student has no device registered yet, register now (first bind)
+      if (!student.deviceId) {
+        student.deviceId = deviceId;
+        student.deviceRegisteredAt = new Date();
+        await student.save();
+        console.log(`🔒 Device ${deviceId.substring(0,8)}... registered to student ${studentId} on confirm`);
+      }
+
+      // If attendance has no deviceId set (unlikely), set it for completeness
+      if (!attendance.deviceId) {
+        attendance.deviceId = deviceId;
+      }
+    }
+
+  attendance.status = 'confirmed';
     attendance.confirmedAt = new Date();
     await attendance.save();
 
