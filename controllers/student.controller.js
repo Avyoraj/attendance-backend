@@ -169,3 +169,138 @@ exports.getStudentById = async (req, res) => {
     });
   }
 };
+
+/**
+ * 🔓 Reset Device Binding (Admin/Teacher Only)
+ * 
+ * Allows a teacher/admin to unbind a student's device.
+ * Use case: Student gets a new phone or factory resets their device.
+ * 
+ * Security: Requires teacher authentication
+ */
+exports.resetDeviceBinding = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { reason } = req.body;
+    const teacherId = req.teacher?._id || req.admin?._id || 'system';
+    const teacherName = req.teacher?.name || req.admin?.email || 'System';
+
+    // Validation
+    if (!studentId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing studentId parameter'
+      });
+    }
+
+    // Find the student
+    const student = await Student.findOne({ studentId });
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        error: 'Student not found',
+        message: `No student found with ID: ${studentId}`
+      });
+    }
+
+    // Check if device binding exists
+    if (!student.deviceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'No device binding',
+        message: `Student ${studentId} has no device binding to reset`
+      });
+    }
+
+    // Store old device info for logging
+    const previousDeviceId = student.deviceId;
+    const previousBindingDate = student.deviceRegisteredAt;
+
+    // Clear the device binding
+    student.deviceId = null;
+    student.deviceRegisteredAt = null;
+    await student.save();
+
+    // Log the action
+    console.log(`🔓 DEVICE BINDING RESET:`);
+    console.log(`   Student: ${studentId} (${student.name})`);
+    console.log(`   Previous Device: ${previousDeviceId}`);
+    console.log(`   Bound Since: ${previousBindingDate}`);
+    console.log(`   Reset By: ${teacherName} (${teacherId})`);
+    console.log(`   Reason: ${reason || 'Not specified'}`);
+    console.log(`   Time: ${new Date().toISOString()}`);
+
+    res.status(200).json({
+      success: true,
+      message: `Device binding reset for student ${studentId}`,
+      details: {
+        studentId: student.studentId,
+        studentName: student.name,
+        previousDeviceId: previousDeviceId.substring(0, 8) + '...', // Partial for security
+        previousBindingDate,
+        resetBy: teacherName,
+        resetAt: new Date(),
+        reason: reason || 'Not specified'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Reset device binding error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to reset device binding',
+      details: error.message
+    });
+  }
+};
+
+/**
+ * 📋 Get All Device Bindings (Admin/Teacher Only)
+ * 
+ * Lists all students with their device binding status.
+ * Useful for admin dashboard to identify locked-out students.
+ */
+exports.getDeviceBindings = async (req, res) => {
+  try {
+    const { status } = req.query; // 'bound', 'unbound', 'all'
+
+    let query = {};
+    if (status === 'bound') {
+      query.deviceId = { $ne: null };
+    } else if (status === 'unbound') {
+      query.deviceId = null;
+    }
+
+    const students = await Student.find(query)
+      .select('studentId name deviceId deviceRegisteredAt isActive')
+      .sort({ studentId: 1 });
+
+    const summary = {
+      total: students.length,
+      bound: students.filter(s => s.deviceId).length,
+      unbound: students.filter(s => !s.deviceId).length
+    };
+
+    res.status(200).json({
+      success: true,
+      summary,
+      students: students.map(s => ({
+        studentId: s.studentId,
+        name: s.name,
+        hasDeviceBinding: !!s.deviceId,
+        deviceIdPrefix: s.deviceId ? s.deviceId.substring(0, 8) + '...' : null,
+        boundSince: s.deviceRegisteredAt,
+        isActive: s.isActive
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Get device bindings error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch device bindings',
+      details: error.message
+    });
+  }
+};

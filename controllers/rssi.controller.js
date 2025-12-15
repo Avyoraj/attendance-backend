@@ -9,10 +9,15 @@ const { analyzeCorrelations } = require('../scripts/analyze-correlations');
 
 /**
  * Upload RSSI stream data
+ * 
+ * Includes server-side time sync to handle client clock drift:
+ * - Client sends `deviceTimestamp` (client's current time)
+ * - Server calculates offset = serverTime - deviceTime
+ * - All RSSI timestamps are corrected by this offset before storage
  */
 exports.uploadStream = async (req, res) => {
   try {
-    const { studentId, classId, rssiData, sessionDate: sessionDateInput } = req.body;
+    const { studentId, classId, rssiData, sessionDate: sessionDateInput, deviceTimestamp } = req.body;
 
     if (!studentId || !classId || !rssiData || !Array.isArray(rssiData)) {
       return res.status(400).json({ 
@@ -20,6 +25,36 @@ exports.uploadStream = async (req, res) => {
         required: ['studentId', 'classId', 'rssiData (array)']
       });
     }
+
+    // Calculate clock offset for time sync
+    // offset > 0 means device clock is behind server
+    // offset < 0 means device clock is ahead of server
+    let clockOffsetMs = 0;
+    if (deviceTimestamp) {
+      const deviceTime = new Date(deviceTimestamp).getTime();
+      const serverTime = Date.now();
+      clockOffsetMs = serverTime - deviceTime;
+      
+      // Log significant clock drift (> 5 seconds)
+      if (Math.abs(clockOffsetMs) > 5000) {
+        console.log(`⏰ Clock drift detected for ${studentId}: ${(clockOffsetMs / 1000).toFixed(1)}s`);
+      }
+    }
+
+    // Correct timestamps in RSSI data if there's clock drift
+    const correctedRssiData = rssiData.map(reading => {
+      if (reading.timestamp && clockOffsetMs !== 0) {
+        const originalTime = new Date(reading.timestamp).getTime();
+        const correctedTime = new Date(originalTime + clockOffsetMs);
+        return {
+          ...reading,
+          timestamp: correctedTime.toISOString(),
+          originalTimestamp: reading.timestamp, // Keep original for debugging
+          clockOffsetMs: clockOffsetMs // Store offset for analysis
+        };
+      }
+      return reading;
+    });
 
     // Use provided sessionDate if present, else default to today
     let sessionDate;
@@ -39,30 +74,36 @@ exports.uploadStream = async (req, res) => {
     });
 
     if (stream) {
-      // Append new data
-      stream.rssiData.push(...rssiData);
+      // Append new data (with corrected timestamps)
+      stream.rssiData.push(...correctedRssiData);
       stream.completedAt = new Date();
       stream.totalReadings = stream.rssiData.length;
+      // Track clock offset for this device
+      if (clockOffsetMs !== 0) {
+        stream.lastClockOffsetMs = clockOffsetMs;
+      }
     } else {
       // Create new stream
       stream = new RSSIStream({
         studentId,
         classId,
         sessionDate,
-        rssiData,
-        totalReadings: rssiData.length
+        rssiData: correctedRssiData,
+        totalReadings: correctedRssiData.length,
+        lastClockOffsetMs: clockOffsetMs !== 0 ? clockOffsetMs : undefined
       });
     }
 
     await stream.save();
 
-    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${stream.totalReadings} readings)`);
+    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${stream.totalReadings} readings)${clockOffsetMs !== 0 ? ` [clock offset: ${(clockOffsetMs/1000).toFixed(1)}s]` : ''}`);
 
     res.status(200).json({
       success: true,
       message: 'RSSI data recorded',
       totalReadings: stream.totalReadings,
-      streamId: stream._id
+      streamId: stream._id,
+      clockOffsetMs: clockOffsetMs !== 0 ? clockOffsetMs : undefined
     });
 
   } catch (error) {

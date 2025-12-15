@@ -30,6 +30,13 @@ const rssiStreamSchema = new mongoose.Schema({
     },
     distance: {
       type: Number
+    },
+    // For time sync debugging
+    originalTimestamp: {
+      type: Date
+    },
+    clockOffsetMs: {
+      type: Number
     }
   }],
   
@@ -44,6 +51,12 @@ const rssiStreamSchema = new mongoose.Schema({
   totalReadings: {
     type: Number,
     default: 0
+  },
+  
+  // Clock drift tracking for this device
+  // Positive = device behind server, Negative = device ahead
+  lastClockOffsetMs: {
+    type: Number
   },
   
   createdAt: {

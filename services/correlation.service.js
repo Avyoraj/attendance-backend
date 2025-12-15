@@ -35,24 +35,77 @@ class CorrelationService {
       };
     }
 
-    // 3. Calculate means
+    // 3. Calculate means and standard deviations
     const mean1 = this.calculateMean(aligned1);
     const mean2 = this.calculateMean(aligned2);
+    const stdDev1 = this.calculateStdDev(aligned1, mean1);
+    const stdDev2 = this.calculateStdDev(aligned2, mean2);
 
     // 4. Calculate Pearson correlation
     const correlation = this.pearsonFormula(aligned1, aligned2, mean1, mean2);
 
+    // 5. Check for stationary proxy (desk scenario)
+    // If both signals are flat AND close together, it's suspicious
+    const stationaryCheck = this.checkStationaryProxy(aligned1, aligned2, mean1, mean2, stdDev1, stdDev2);
+
     console.log(`📊 Correlation computed: ρ = ${correlation.toFixed(4)} (${aligned1.length} data points)`);
+    if (stationaryCheck.isStationary) {
+      console.log(`🪑 Stationary detection: both devices stable, mean diff = ${stationaryCheck.meanDifference.toFixed(2)} dBm`);
+    }
 
     return {
       correlation,
       dataPoints: aligned1.length,
       mean1: mean1.toFixed(2),
       mean2: mean2.toFixed(2),
+      stdDev1: stdDev1.toFixed(2),
+      stdDev2: stdDev2.toFixed(2),
       aligned1,
       aligned2,
-      commonTimestamps: timestamps
+      commonTimestamps: timestamps,
+      stationaryCheck
     };
+  }
+
+  /**
+   * Check for stationary proxy scenario (devices sitting on desk together)
+   * Detects when correlation is low BUT both devices have:
+   * - Low variance (stationary/stable)
+   * - Similar average RSSI (same location)
+   */
+  checkStationaryProxy(data1, data2, mean1, mean2, stdDev1, stdDev2) {
+    const STATIONARY_THRESHOLD = 3;    // StdDev below this = stationary
+    const MEAN_DIFF_THRESHOLD = 5;     // If means within 5 dBm = same location
+    
+    const isStationary1 = stdDev1 < STATIONARY_THRESHOLD;
+    const isStationary2 = stdDev2 < STATIONARY_THRESHOLD;
+    const meanDifference = Math.abs(mean1 - mean2);
+    const isSameLocation = meanDifference <= MEAN_DIFF_THRESHOLD;
+    
+    const isStationary = isStationary1 && isStationary2;
+    const isSuspiciousStationary = isStationary && isSameLocation;
+    
+    return {
+      isStationary,
+      isStationary1,
+      isStationary2,
+      meanDifference,
+      isSameLocation,
+      isSuspiciousStationary,
+      reason: isSuspiciousStationary 
+        ? 'Both devices stationary at same location (desk scenario)' 
+        : null
+    };
+  }
+
+  /**
+   * Calculate standard deviation
+   */
+  calculateStdDev(data, mean) {
+    if (data.length === 0) return 0;
+    const squaredDiffs = data.map(val => Math.pow(val - mean, 2));
+    const avgSquaredDiff = squaredDiffs.reduce((a, b) => a + b, 0) / data.length;
+    return Math.sqrt(avgSquaredDiff);
   }
 
   /**
@@ -113,18 +166,32 @@ class CorrelationService {
     const timestamps = [];
     const tolerance = 2000; // 2 seconds in milliseconds
 
-    const times1 = Array.from(map1.keys()).sort();
-    const times2 = Array.from(map2.keys()).sort();
+    const times1 = Array.from(map1.keys()).sort((a, b) => a - b);
+    const times2 = Array.from(map2.keys()).sort((a, b) => a - b);
 
-    // Match timestamps within tolerance window
-    for (const time1 of times1) {
-      for (const time2 of times2) {
-        if (Math.abs(time1 - time2) <= tolerance) {
-          aligned1.push(map1.get(time1));
-          aligned2.push(map2.get(time2));
-          timestamps.push(new Date(time1));
-          break;
-        }
+    // Match timestamps within tolerance window using two-pointer approach
+    // This ensures 1-to-1 matching (no data duplication)
+    let ptr2 = 0;
+
+    for (const t1 of times1) {
+      // Advance ptr2 to the first potential match (t2 >= t1 - tolerance)
+      while (ptr2 < times2.length && times2[ptr2] < t1 - tolerance) {
+        ptr2++;
+      }
+
+      // Check if we ran out of data in times2
+      if (ptr2 >= times2.length) break;
+
+      const t2 = times2[ptr2];
+
+      // Check if t2 is within valid range (t2 <= t1 + tolerance)
+      if (t2 <= t1 + tolerance) {
+        aligned1.push(map1.get(t1));
+        aligned2.push(map2.get(t2));
+        timestamps.push(new Date(t1));
+        
+        // Move pointer to prevent reusing this t2 (1-to-1 matching)
+        ptr2++;
       }
     }
 
@@ -159,12 +226,36 @@ class CorrelationService {
 
   /**
    * Check if correlation indicates proxy behavior
+   * Now includes stationary detection for the "desk scenario"
    * 
    * @param {Number} correlation - Pearson correlation coefficient
-   * @returns {Boolean} True if suspicious (ρ ≥ 0.9)
+   * @param {Object} stationaryCheck - Result from checkStationaryProxy
+   * @returns {Object} { suspicious, reason }
    */
-  isSuspicious(correlation) {
-    return Math.abs(correlation) >= 0.9;
+  isSuspicious(correlation, stationaryCheck = null) {
+    // High correlation = moving together
+    if (Math.abs(correlation) >= 0.9) {
+      return {
+        suspicious: true,
+        reason: 'high_correlation',
+        description: `High correlation (ρ = ${correlation.toFixed(4)}) - devices moving together`
+      };
+    }
+    
+    // Stationary proxy detection (desk scenario)
+    if (stationaryCheck && stationaryCheck.isSuspiciousStationary) {
+      return {
+        suspicious: true,
+        reason: 'stationary_proxy',
+        description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm)`
+      };
+    }
+    
+    return {
+      suspicious: false,
+      reason: 'normal',
+      description: 'No proxy indicators detected'
+    };
   }
 
   /**
@@ -194,7 +285,7 @@ class CorrelationService {
 
         if (result.correlation !== null) {
           const severity = this.determineSeverity(result.correlation);
-          const suspicious = this.isSuspicious(result.correlation);
+          const suspiciousResult = this.isSuspicious(result.correlation, result.stationaryCheck);
 
           const analysis = {
             student1: stream1.studentId,
@@ -203,15 +294,20 @@ class CorrelationService {
             dataPoints: result.dataPoints,
             mean1: result.mean1,
             mean2: result.mean2,
+            stdDev1: result.stdDev1,
+            stdDev2: result.stdDev2,
             severity,
-            suspicious
+            suspicious: suspiciousResult.suspicious,
+            suspiciousReason: suspiciousResult.reason,
+            suspiciousDescription: suspiciousResult.description,
+            stationaryCheck: result.stationaryCheck
           };
 
           results.push(analysis);
 
           // Flag suspicious pairs
-          if (suspicious) {
-            console.log(`🚨 FLAGGED: Correlation ρ = ${result.correlation.toFixed(4)} (≥ 0.9)`);
+          if (suspiciousResult.suspicious) {
+            console.log(`🚨 FLAGGED: ${suspiciousResult.description}`);
             flaggedPairs.push(analysis);
           } else {
             console.log(`✅ Normal: Correlation ρ = ${result.correlation.toFixed(4)} (< 0.9)`);
