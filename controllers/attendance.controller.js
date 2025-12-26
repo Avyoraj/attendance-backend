@@ -1,22 +1,19 @@
 /**
- * ✅ Attendance Controller
+ * Attendance Controller (Supabase Version)
  * 
  * Business logic for attendance check-in, confirmation, and queries
  */
 
-const Attendance = require('../models/Attendance');
-const Student = require('../models/Student');
+const { supabaseAdmin } = require('../utils/supabase');
 
 /**
  * Check-in (provisional attendance)
  */
 exports.checkIn = async (req, res) => {
   try {
-    // Accept both deviceIdHash (preferred) and deviceId (legacy)
     const { studentId, classId, deviceIdHash, deviceId: legacyDeviceId, rssi, distance, beaconMajor, beaconMinor } = req.body;
     const deviceId = deviceIdHash || legacyDeviceId || null;
 
-    // Validation
     if (!studentId || !classId) {
       return res.status(400).json({ 
         error: 'Missing required fields',
@@ -24,195 +21,133 @@ exports.checkIn = async (req, res) => {
       });
     }
 
-    // Get today's date (for uniqueness check)
-    const today = new Date();
-    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const today = new Date().toISOString().split('T')[0];
 
-    // ✅ CRITICAL: Check device FIRST (before student creation)
+    // Check device binding
     if (deviceId) {
-      console.log(`🔍 Checking device availability: ${deviceId.substring(0, 8)}... for student ${studentId}`);
-      
-      // Check if this device is already registered to ANY student (including this one)
-      const existingDeviceUser = await Student.findOne({ deviceId });
-      
-      if (existingDeviceUser) {
-        // Device is already registered
-        if (existingDeviceUser.studentId !== studentId) {
-          // Registered to DIFFERENT student - BLOCK
-          console.log(`❌ BLOCKED: Device ${deviceId.substring(0, 8)}... is locked to student ${existingDeviceUser.studentId}`);
-          return res.status(403).json({
-            success: false,
-            error: 'DEVICE_MISMATCH',
-            message: `This device is already linked to another student account (${existingDeviceUser.studentId})`,
-            lockedToStudent: existingDeviceUser.studentId,
-            lockedSince: existingDeviceUser.deviceRegisteredAt
-          });
-        } else {
-          // Registered to THIS student - OK, continue
-          console.log(`✅ Device verified for student ${studentId}`);
-        }
-      } else {
-        console.log(`✅ Device ${deviceId.substring(0, 8)}... is available`);
+      const { data: existingDeviceUser } = await supabaseAdmin
+        .from('students')
+        .select('student_id')
+        .eq('device_id', deviceId)
+        .single();
+
+      if (existingDeviceUser && existingDeviceUser.student_id !== studentId) {
+        return res.status(403).json({
+          success: false,
+          error: 'DEVICE_MISMATCH',
+          message: `This device is already linked to another student account (${existingDeviceUser.student_id})`
+        });
       }
     }
 
-    // Now safe to get/create student
-    let student = await Student.findOne({ studentId });
-    
-    if (!student) {
-      // New student - register device immediately
-      student = new Student({
-        studentId,
-        name: `Student ${studentId}`,
-        deviceId: deviceId || null,
-        deviceRegisteredAt: deviceId ? new Date() : null
-      });
-      await student.save();
-  console.log(`✨ Created new student: ${studentId} with device ${deviceId ? deviceId.substring(0, 8) + '...' : 'none'}`);
-    } else if (!student.deviceId && deviceId) {
-      // Existing student without device - register it now
-      student.deviceId = deviceId;
-      student.deviceRegisteredAt = new Date();
-      await student.save();
-      console.log(`🔒 Device ${deviceId.substring(0, 8)}... registered for existing student: ${studentId}`);
-    }
+    // Get or create student
+    let { data: student } = await supabaseAdmin
+      .from('students')
+      .select('*')
+      .eq('student_id', studentId)
+      .single();
 
-    // Final verification: ensure device matches
-    if (student.deviceId && deviceId && student.deviceId !== deviceId) {
-      console.log(`❌ Device mismatch: Expected ${student.deviceId.substring(0, 8)}..., got ${deviceId.substring(0, 8)}...`);
-      return res.status(403).json({
-        success: false,
-        error: 'DEVICE_MISMATCH',
-        message: 'This account is linked to a different device'
-      });
+    if (!student) {
+      const { data: newStudent } = await supabaseAdmin
+        .from('students')
+        .insert({
+          student_id: studentId,
+          name: `Student ${studentId}`,
+          device_id: deviceId
+        })
+        .select()
+        .single();
+      student = newStudent;
+    } else if (!student.device_id && deviceId) {
+      await supabaseAdmin
+        .from('students')
+        .update({ device_id: deviceId })
+        .eq('student_id', studentId);
     }
 
     // Check for existing attendance today
-    let attendance = await Attendance.findOne({
-      studentId,
-      classId,
-      sessionDate
-    });
+    const { data: existing } = await supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('session_date', today)
+      .single();
 
-    if (attendance) {
-      // Update existing record (for confirmation or RSSI update)
-      attendance.rssi = rssi || attendance.rssi;
-      attendance.distance = distance || attendance.distance;
-      
-      if (attendance.status === 'provisional' && req.body.confirm === true) {
-        attendance.status = 'confirmed';
-        attendance.confirmedAt = new Date();
-      }
-      
-      await attendance.save();
-
-      // Compute remainingSeconds for confirmation window when provisional
-      const confirmationWindowSeconds = 3 * 60; // keep in sync with client/docs
+    if (existing) {
+      const confirmationWindowSeconds = 3 * 60;
       const now = new Date();
       let remainingSeconds = 0;
-      if (attendance.status === 'provisional' && attendance.checkInTime) {
-        const elapsedSeconds = Math.floor((now.getTime() - attendance.checkInTime.getTime()) / 1000);
-        remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
+      
+      if (existing.status === 'provisional' && existing.check_in_time) {
+        const elapsed = Math.floor((now.getTime() - new Date(existing.check_in_time).getTime()) / 1000);
+        remainingSeconds = Math.max(confirmationWindowSeconds - elapsed, 0);
       }
 
       return res.status(200).json({
         success: true,
-        message: 'Attendance updated',
-        status: attendance.status,
+        message: 'Attendance already recorded',
+        status: existing.status,
         alreadyMarked: true,
         remainingSeconds,
         attendance: {
-          id: attendance._id,
-          studentId: attendance.studentId,
-          classId: attendance.classId,
-          status: attendance.status,
-          checkInTime: attendance.checkInTime,
-          confirmedAt: attendance.confirmedAt
+          id: existing.id,
+          studentId: existing.student_id,
+          classId: existing.class_id,
+          status: existing.status,
+          checkInTime: existing.check_in_time,
+          confirmedAt: existing.confirmed_at
         }
       });
     }
 
-    // Create new attendance record
-    attendance = new Attendance({
-      studentId,
-      classId,
-      deviceId: deviceId || student.deviceId,
-      status: 'provisional', // Start as provisional
-      rssi: rssi || -70, // Default if not provided
-      distance: distance || null,
-      beaconMajor: beaconMajor || null,
-      beaconMinor: beaconMinor || null,
-      sessionDate
-    });
+    // Create new attendance
+    const { data: attendance, error } = await supabaseAdmin
+      .from('attendance')
+      .insert({
+        student_id: studentId,
+        class_id: classId,
+        device_id: deviceId || student?.device_id,
+        status: 'provisional',
+        rssi: rssi || -70,
+        distance: distance || null,
+        beacon_major: beaconMajor || null,
+        beacon_minor: beaconMinor || null,
+        session_date: today
+      })
+      .select()
+      .single();
 
-    await attendance.save();
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(200).json({ success: true, message: 'Attendance already recorded' });
+      }
+      throw error;
+    }
 
-    console.log(`✅ Attendance marked: ${studentId} in ${classId} (${attendance.status})`);
+    console.log(`✅ Attendance marked: ${studentId} in ${classId} (provisional)`);
 
-    // Remaining seconds for confirmation window
-    const confirmationWindowSeconds = 3 * 60;
     res.status(201).json({
       success: true,
       message: 'Attendance recorded successfully',
       status: 'provisional',
-      remainingSeconds: confirmationWindowSeconds,
+      remainingSeconds: 180,
       attendance: {
-        id: attendance._id,
-        studentId: attendance.studentId,
-        classId: attendance.classId,
+        id: attendance.id,
+        studentId: attendance.student_id,
+        classId: attendance.class_id,
         status: attendance.status,
-        checkInTime: attendance.checkInTime,
+        checkInTime: attendance.check_in_time,
         rssi: attendance.rssi
       }
     });
 
   } catch (error) {
     console.error('❌ Check-in error:', error);
-    
-    // Handle duplicate key error idempotently: return existing record as success 200
-    if (error.code === 11000) {
-      try {
-        const today = new Date();
-        const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        const { studentId, classId } = req.body;
-        const existing = await Attendance.findOne({ studentId, classId, sessionDate });
-        if (existing) {
-          const confirmationWindowSeconds = 3 * 60;
-          const now = new Date();
-          let remainingSeconds = 0;
-          if (existing.status === 'provisional' && existing.checkInTime) {
-            const elapsedSeconds = Math.floor((now.getTime() - existing.checkInTime.getTime()) / 1000);
-            remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
-          }
-          return res.status(200).json({
-            success: true,
-            message: 'Attendance already recorded',
-            status: existing.status,
-            alreadyMarked: true,
-            remainingSeconds,
-            attendance: {
-              id: existing._id,
-              studentId: existing.studentId,
-              classId: existing.classId,
-              status: existing.status,
-              checkInTime: existing.checkInTime,
-              confirmedAt: existing.confirmedAt
-            }
-          });
-        }
-      } catch (e2) {
-        console.error('❌ Idempotent fallback failed:', e2);
-      }
-      return res.status(200).json({ success: true, message: 'Attendance already recorded' });
-    }
-    
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to record attendance',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to record attendance' });
   }
 };
+
 
 /**
  * Confirm provisional attendance
@@ -223,117 +158,80 @@ exports.confirmAttendance = async (req, res) => {
     const deviceId = deviceIdHash || legacyDeviceId || null;
 
     if (!studentId || !classId) {
-      return res.status(400).json({ 
-        error: 'Missing required fields',
-        required: ['studentId', 'classId']
-      });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const today = new Date();
-    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const today = new Date().toISOString().split('T')[0];
 
-  // FIX #2: Support direct lookup by attendance ID (more reliable)
-    let attendance;
+    // Find attendance record
+    let query = supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('status', 'provisional');
+
     if (attendanceId) {
-      // Direct lookup by ID (fast, accurate)
-      attendance = await Attendance.findById(attendanceId);
-      
-      if (!attendance) {
-        return res.status(404).json({
-          error: 'No provisional attendance found',
-          message: 'Attendance ID not found'
-        });
-      }
-      
-      // Verify it's for the right student/class
-      if (attendance.studentId !== studentId || attendance.classId !== classId) {
-        return res.status(400).json({
-          error: 'Attendance mismatch',
-          message: 'Attendance ID does not match student/class'
-        });
-      }
+      query = query.eq('id', attendanceId);
     } else {
-      // Fallback: Search by student/class/date (slower, less reliable)
-      attendance = await Attendance.findOne({
-        studentId,
-        classId,
-        sessionDate,
-        status: 'provisional'
-      });
-      
-      if (!attendance) {
-        return res.status(404).json({
-          error: 'No provisional attendance found',
-          message: 'Cannot confirm attendance that does not exist or is already confirmed'
-        });
-      }
+      query = query.eq('session_date', today);
     }
 
-    // 🔒 Enforce device binding at confirmation time (defense-in-depth)
-    if (deviceId) {
-      const student = await Student.findOne({ studentId });
-      if (!student) {
-        return res.status(404).json({ error: 'Student not found' });
-      }
+    const { data: attendance, error: findError } = await query.single();
 
-      // If student has a registered device, it must match
-      if (student.deviceId && student.deviceId !== deviceId) {
-        console.log(`❌ Device mismatch on confirm: expected ${student.deviceId.substring(0,8)}..., got ${deviceId.substring(0,8)}...`);
+    if (findError || !attendance) {
+      return res.status(404).json({
+        error: 'No provisional attendance found',
+        message: 'Cannot confirm attendance that does not exist or is already confirmed'
+      });
+    }
+
+    // Device binding check
+    if (deviceId) {
+      const { data: student } = await supabaseAdmin
+        .from('students')
+        .select('device_id')
+        .eq('student_id', studentId)
+        .single();
+
+      if (student?.device_id && student.device_id !== deviceId) {
         return res.status(403).json({
           success: false,
           error: 'DEVICE_MISMATCH',
           message: 'This account is linked to a different device'
         });
       }
-
-      // If attendance record has deviceId, it must match as well
-      if (attendance.deviceId && attendance.deviceId !== deviceId) {
-        console.log(`❌ Attendance/device mismatch on confirm: attendance=${attendance.deviceId.substring(0,8)}... got=${deviceId.substring(0,8)}...`);
-        return res.status(403).json({
-          success: false,
-          error: 'DEVICE_MISMATCH',
-          message: 'Confirm request device does not match original check-in device'
-        });
-      }
-
-      // If student has no device registered yet, register now (first bind)
-      if (!student.deviceId) {
-        student.deviceId = deviceId;
-        student.deviceRegisteredAt = new Date();
-        await student.save();
-        console.log(`🔒 Device ${deviceId.substring(0,8)}... registered to student ${studentId} on confirm`);
-      }
-
-      // If attendance has no deviceId set (unlikely), set it for completeness
-      if (!attendance.deviceId) {
-        attendance.deviceId = deviceId;
-      }
     }
 
-  attendance.status = 'confirmed';
-    attendance.confirmedAt = new Date();
-    await attendance.save();
+    // Update to confirmed
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from('attendance')
+      .update({
+        status: 'confirmed',
+        confirmed_at: new Date().toISOString()
+      })
+      .eq('id', attendance.id)
+      .select()
+      .single();
 
-    console.log(`✅ Attendance confirmed: ${studentId} in ${classId} (ID: ${attendance._id})`);
+    if (updateError) throw updateError;
+
+    console.log(`✅ Attendance confirmed: ${studentId} in ${classId}`);
 
     res.status(200).json({
       success: true,
       message: 'Attendance confirmed successfully',
       attendance: {
-        id: attendance._id,
-        status: attendance.status,
-        checkInTime: attendance.checkInTime,
-        confirmedAt: attendance.confirmedAt
+        id: updated.id,
+        status: updated.status,
+        checkInTime: updated.check_in_time,
+        confirmedAt: updated.confirmed_at
       }
     });
 
   } catch (error) {
     console.error('❌ Confirmation error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to confirm attendance',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to confirm attendance' });
   }
 };
 
@@ -345,38 +243,27 @@ exports.cancelProvisional = async (req, res) => {
     const { studentId, classId } = req.body;
 
     if (!studentId || !classId) {
-      return res.status(400).json({ 
-        error: 'Missing required fields',
-        required: ['studentId', 'classId']
-      });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const today = new Date();
-    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const today = new Date().toISOString().split('T')[0];
 
-    // Update status to 'cancelled' instead of deleting
-    const result = await Attendance.findOneAndUpdate(
-      {
-        studentId,
-        classId,
-        sessionDate,
-        status: 'provisional'
-      },
-      {
-        $set: {
-          status: 'cancelled',
-          cancelledAt: new Date(),
-          cancellationReason: 'Student left classroom before confirmation period ended'
-        }
-      },
-      { new: true }
-    );
+    const { data: updated, error } = await supabaseAdmin
+      .from('attendance')
+      .update({
+        status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        cancellation_reason: 'Student left classroom before confirmation'
+      })
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('session_date', today)
+      .eq('status', 'provisional')
+      .select()
+      .single();
 
-    if (!result) {
-      return res.status(404).json({
-        error: 'No provisional attendance found',
-        message: 'Cannot cancel attendance that does not exist or is already confirmed'
-      });
+    if (error || !updated) {
+      return res.status(404).json({ error: 'No provisional attendance found' });
     }
 
     console.log(`🚫 Cancelled provisional attendance for ${studentId} in ${classId}`);
@@ -384,20 +271,12 @@ exports.cancelProvisional = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Provisional attendance cancelled',
-      attendance: {
-        id: result._id,
-        status: result.status,
-        cancelledAt: result.cancelledAt
-      }
+      attendance: { id: updated.id, status: updated.status }
     });
 
   } catch (error) {
     console.error('❌ Cancel error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to cancel attendance',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to cancel attendance' });
   }
 };
 
@@ -407,58 +286,37 @@ exports.cancelProvisional = async (req, res) => {
 exports.getTodayAttendance = async (req, res) => {
   try {
     const { studentId } = req.params;
+    const today = new Date().toISOString().split('T')[0];
 
-    const today = new Date();
-    const sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const { data: attendance, error } = await supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('student_id', studentId)
+      .eq('session_date', today)
+      .order('check_in_time', { ascending: false });
 
-    const attendance = await Attendance.find({
-      studentId,
-      sessionDate
-    }).sort({ checkInTime: -1 });
+    if (error) throw error;
 
-    const confirmationWindowSeconds = 3 * 60; // 3 minutes
-    const cooldownWindowMinutes = 15;
+    const confirmationWindowSeconds = 180;
     const now = new Date();
 
-    const formattedAttendance = attendance.map(record => {
-      const checkInTime = record.checkInTime;
-      const confirmedAt = record.confirmedAt;
-      const cancelledAt = record.cancelledAt;
-
+    const formatted = (attendance || []).map(record => {
       const base = {
-        attendanceId: record._id.toString(),
-        studentId: record.studentId,
-        classId: record.classId,
+        attendanceId: record.id,
+        studentId: record.student_id,
+        classId: record.class_id,
         status: record.status,
-        checkInTime: checkInTime ? checkInTime.toISOString() : null,
-        confirmedAt: confirmedAt ? confirmedAt.toISOString() : null,
-        cancelledAt: cancelledAt ? cancelledAt.toISOString() : null,
-        cancellationReason: record.cancellationReason || null,
-        deviceId: record.deviceId,
+        checkInTime: record.check_in_time,
+        confirmedAt: record.confirmed_at,
+        cancelledAt: record.cancelled_at,
+        deviceId: record.device_id,
         rssi: record.rssi,
-        distance: record.distance,
-        beaconMajor: record.beaconMajor,
-        beaconMinor: record.beaconMinor,
+        distance: record.distance
       };
 
-      if (record.status === 'provisional' && checkInTime) {
-        const elapsedSeconds = Math.floor((now.getTime() - checkInTime.getTime()) / 1000);
-        const remainingSeconds = Math.max(confirmationWindowSeconds - elapsedSeconds, 0);
-        base.remainingSeconds = remainingSeconds;
-        base.confirmationExpiresAt = new Date(checkInTime.getTime() + confirmationWindowSeconds * 1000).toISOString();
-      }
-
-      if (record.status === 'confirmed') {
-        const referenceTime = confirmedAt || checkInTime;
-        if (referenceTime) {
-          const cooldownEndsAt = new Date(referenceTime.getTime() + cooldownWindowMinutes * 60 * 1000);
-          const secondsRemaining = Math.max(Math.floor((cooldownEndsAt.getTime() - now.getTime()) / 1000), 0);
-          base.cooldown = {
-            minutesRemaining: Math.max(Math.ceil(secondsRemaining / 60), 0),
-            secondsRemaining,
-            cooldownEndsAt: cooldownEndsAt.toISOString(),
-          };
-        }
+      if (record.status === 'provisional' && record.check_in_time) {
+        const elapsed = Math.floor((now.getTime() - new Date(record.check_in_time).getTime()) / 1000);
+        base.remainingSeconds = Math.max(confirmationWindowSeconds - elapsed, 0);
       }
 
       return base;
@@ -467,18 +325,14 @@ exports.getTodayAttendance = async (req, res) => {
     res.status(200).json({
       success: true,
       studentId,
-      date: sessionDate.toISOString(),
-      count: formattedAttendance.length,
-      attendance: formattedAttendance,
+      date: today,
+      count: formatted.length,
+      attendance: formatted
     });
 
   } catch (error) {
     console.error('❌ Get today attendance error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to fetch attendance',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch attendance' });
   }
 };
 
@@ -489,34 +343,24 @@ exports.queryAttendance = async (req, res) => {
   try {
     const { studentId, classId, date, status, limit = 100 } = req.query;
 
-    const query = {};
-    
-    if (studentId) query.studentId = studentId;
-    if (classId) query.classId = classId;
-    if (status) query.status = status;
-    
-    if (date) {
-      const queryDate = new Date(date);
-      const sessionDate = new Date(queryDate.getFullYear(), queryDate.getMonth(), queryDate.getDate());
-      query.sessionDate = sessionDate;
-    }
+    let query = supabaseAdmin.from('attendance').select('*');
 
-    const attendance = await Attendance
-      .find(query)
-      .sort({ createdAt: -1 })
+    if (studentId) query = query.eq('student_id', studentId);
+    if (classId) query = query.eq('class_id', classId);
+    if (status) query = query.eq('status', status);
+    if (date) query = query.eq('session_date', date);
+
+    const { data: attendance, error } = await query
+      .order('created_at', { ascending: false })
       .limit(parseInt(limit));
 
-    res.status(200).json({
-      count: attendance.length,
-      attendance
-    });
+    if (error) throw error;
+
+    res.status(200).json({ count: attendance?.length || 0, attendance: attendance || [] });
 
   } catch (error) {
-    console.error('❌ Get attendance error:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch attendance',
-      details: error.message 
-    });
+    console.error('❌ Query attendance error:', error);
+    res.status(500).json({ error: 'Failed to fetch attendance' });
   }
 };
 
@@ -528,31 +372,175 @@ exports.getClassAttendance = async (req, res) => {
     const { classId } = req.params;
     const { date, status } = req.query;
 
-    const query = { classId };
-    
-    if (status) query.status = status;
-    
-    if (date) {
-      const queryDate = new Date(date);
-      const sessionDate = new Date(queryDate.getFullYear(), queryDate.getMonth(), queryDate.getDate());
-      query.sessionDate = sessionDate;
-    }
+    let query = supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('class_id', classId);
 
-    const attendance = await Attendance
-      .find(query)
-      .sort({ checkInTime: -1 });
+    if (status) query = query.eq('status', status);
+    if (date) query = query.eq('session_date', date);
+
+    const { data: attendance, error } = await query.order('check_in_time', { ascending: false });
+
+    if (error) throw error;
 
     res.status(200).json({
       classId,
-      count: attendance.length,
-      attendance
+      count: attendance?.length || 0,
+      attendance: attendance || []
     });
 
   } catch (error) {
     console.error('❌ Get class attendance error:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch class attendance',
-      details: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch class attendance' });
+  }
+};
+
+/**
+ * Upload RSSI stream data (for correlation analysis)
+ */
+exports.uploadRssiStream = async (req, res) => {
+  try {
+    const { studentId, classId, rssiData } = req.body;
+
+    if (!studentId || !classId || !rssiData) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    // Check if stream exists for today
+    const { data: existing } = await supabaseAdmin
+      .from('rssi_streams')
+      .select('id, rssi_data, sample_count')
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('session_date', today)
+      .single();
+
+    if (existing) {
+      // Append to existing stream
+      const updatedData = [...(existing.rssi_data || []), ...rssiData];
+      await supabaseAdmin
+        .from('rssi_streams')
+        .update({
+          rssi_data: updatedData,
+          sample_count: updatedData.length
+        })
+        .eq('id', existing.id);
+    } else {
+      // Create new stream
+      await supabaseAdmin
+        .from('rssi_streams')
+        .insert({
+          student_id: studentId,
+          class_id: classId,
+          session_date: today,
+          rssi_data: rssiData,
+          sample_count: rssiData.length
+        });
+    }
+
+    res.status(200).json({ success: true, message: 'RSSI data uploaded' });
+
+  } catch (error) {
+    console.error('❌ RSSI upload error:', error);
+    res.status(500).json({ error: 'Failed to upload RSSI data' });
+  }
+};
+
+/**
+ * Manual attendance entry (for teachers)
+ */
+exports.manualEntry = async (req, res) => {
+  try {
+    const { studentId, classId, date, status, notes } = req.body;
+
+    if (!studentId || !classId || !date || !status) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Check if attendance already exists
+    const { data: existing } = await supabaseAdmin
+      .from('attendance')
+      .select('id')
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('session_date', date)
+      .single();
+
+    if (existing) {
+      // Update existing
+      const { data: updated } = await supabaseAdmin
+        .from('attendance')
+        .update({
+          status: status === 'present' ? 'confirmed' : status,
+          is_manual: true,
+          cancellation_reason: notes || 'Manual entry by teacher'
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      return res.json({ success: true, message: 'Attendance updated', attendance: updated });
+    }
+
+    // Create new manual entry
+    const { data: attendance, error } = await supabaseAdmin
+      .from('attendance')
+      .insert({
+        student_id: studentId,
+        class_id: classId,
+        session_date: date,
+        status: status === 'present' ? 'confirmed' : 'manual',
+        is_manual: true,
+        device_id: 'MANUAL_ENTRY',
+        cancellation_reason: notes || 'Manual entry by teacher'
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json({ success: true, message: 'Manual attendance recorded', attendance });
+
+  } catch (error) {
+    console.error('❌ Manual entry error:', error);
+    res.status(500).json({ error: 'Failed to record manual attendance' });
+  }
+};
+
+/**
+ * Get attendance history with filters
+ */
+exports.getHistory = async (req, res) => {
+  try {
+    const { classId, startDate, endDate, studentId } = req.query;
+
+    let query = supabaseAdmin.from('attendance').select('*');
+
+    if (classId) query = query.eq('class_id', classId);
+    if (studentId) query = query.eq('student_id', studentId);
+    if (startDate) query = query.gte('session_date', startDate);
+    if (endDate) query = query.lte('session_date', endDate);
+
+    const { data: attendance, error } = await query.order('session_date', { ascending: false });
+
+    if (error) throw error;
+
+    // Calculate summary
+    const summary = {
+      total: attendance?.length || 0,
+      confirmed: attendance?.filter(a => a.status === 'confirmed').length || 0,
+      provisional: attendance?.filter(a => a.status === 'provisional').length || 0,
+      cancelled: attendance?.filter(a => a.status === 'cancelled').length || 0,
+      manual: attendance?.filter(a => a.is_manual).length || 0
+    };
+
+    res.json({ attendance: attendance || [], summary });
+
+  } catch (error) {
+    console.error('❌ Get history error:', error);
+    res.status(500).json({ error: 'Failed to fetch history' });
   }
 };

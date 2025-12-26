@@ -7,6 +7,7 @@
     "dev": "nodemon server.js",
     "test": "echo \"No tests yet. Run smoke:phase1 for a quick check.\" && exit 0",
     "smoke:phase1": "node scripts/phase1-smoke.js",
+    "seed": "node scripts/seed-demo-data.js",
     "analyze:correlations": "node scripts/analyze-correlations.js",
     "analyze:correlations:class": "node scripts/analyze-correlations.js CS101",
     "analyze:correlations:date": "node scripts/analyze-correlations.js CS101 2025-11-06"
@@ -21,9 +22,10 @@
   "license": "ISC",
   "description": "MongoDB-powered attendance backend with device locking and co-location detection",
   "dependencies": {
+    "@supabase/supabase-js": "^2.89.0",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "express": "^4.21.1",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
