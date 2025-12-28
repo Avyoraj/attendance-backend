@@ -214,9 +214,184 @@ app.get('/api/rssi-streams/:classId/:date', async (req, res) => {
   }
 });
 
+// Trigger correlation analysis
+app.post('/api/analyze-correlations', async (req, res) => {
+  try {
+    const { classId, sessionDate } = req.body;
+    
+    console.log('🔍 Triggering correlation analysis...');
+    
+    const { analyzeCorrelations } = require('./scripts/analyze-correlations-supabase');
+    const results = await analyzeCorrelations(classId || null, sessionDate || null);
+    
+    res.json({
+      success: true,
+      message: 'Correlation analysis complete',
+      results
+    });
+  } catch (error) {
+    console.error('❌ Correlation analysis error:', error);
+    res.status(500).json({ error: 'Failed to run correlation analysis' });
+  }
+});
+
+// Run correlation test with simulated data
+app.get('/api/analyze-correlations/test', async (req, res) => {
+  try {
+    console.log('🧪 Running correlation test with simulated data...');
+    
+    const { runWithTestData } = require('./scripts/analyze-correlations-supabase');
+    const results = await runWithTestData();
+    
+    res.json({
+      success: true,
+      message: 'Test analysis complete',
+      totalPairs: results.totalPairs,
+      flaggedCount: results.flaggedCount,
+      results: results.allResults.map(r => ({
+        student1: r.student1,
+        student2: r.student2,
+        correlation: r.correlation.toFixed(4),
+        suspicious: r.suspicious,
+        reason: r.suspiciousDescription
+      }))
+    });
+  } catch (error) {
+    console.error('❌ Test analysis error:', error);
+    res.status(500).json({ error: 'Failed to run test analysis' });
+  }
+});
+
 // ==========================================
 // 📊 STUDENT ENDPOINTS (for Flutter)
 // ==========================================
+
+// Validate device before login (device binding check)
+app.post('/api/validate-device', async (req, res) => {
+  try {
+    const { studentId, deviceId } = req.body;
+
+    if (!studentId || !deviceId) {
+      return res.status(400).json({ 
+        canLogin: false, 
+        error: 'Missing required fields',
+        message: 'Student ID and Device ID are required'
+      });
+    }
+
+    console.log(`🔐 Device validation: Student=${studentId}, Device=${deviceId}`);
+
+    // Check if student exists
+    const { data: student, error: studentError } = await supabaseAdmin
+      .from('students')
+      .select('*')
+      .eq('student_id', studentId)
+      .single();
+
+    if (studentError && studentError.code !== 'PGRST116') {
+      throw studentError;
+    }
+
+    if (!student) {
+      // Student doesn't exist - create new student with this device
+      const { data: newStudent, error: createError } = await supabaseAdmin
+        .from('students')
+        .insert({
+          student_id: studentId,
+          name: `Student ${studentId}`,
+          device_id: deviceId
+        })
+        .select()
+        .single();
+
+      if (createError) throw createError;
+
+      console.log(`✅ New student created: ${studentId} with device ${deviceId}`);
+      return res.json({
+        canLogin: true,
+        message: 'Welcome! Your device has been registered.',
+        isNewStudent: true
+      });
+    }
+
+    // Student exists - check device binding
+    if (!student.device_id) {
+      // No device bound yet - bind this device
+      const { error: updateError } = await supabaseAdmin
+        .from('students')
+        .update({ device_id: deviceId })
+        .eq('student_id', studentId);
+
+      if (updateError) throw updateError;
+
+      console.log(`✅ Device bound to existing student: ${studentId}`);
+      return res.json({
+        canLogin: true,
+        message: 'Welcome back! Your device has been registered.'
+      });
+    }
+
+    if (student.device_id === deviceId) {
+      // Same device - allow login
+      console.log(`✅ Device match for student: ${studentId}`);
+      return res.json({
+        canLogin: true,
+        message: 'Welcome back!'
+      });
+    }
+
+    // Different device - BLOCK LOGIN
+    console.log(`🔒 Device mismatch for ${studentId}: expected ${student.device_id}, got ${deviceId}`);
+    return res.status(403).json({
+      canLogin: false,
+      error: 'DEVICE_MISMATCH',
+      message: 'This account is linked to another device. Contact admin to reset.',
+      lockedToStudent: studentId
+    });
+
+  } catch (error) {
+    console.error('❌ Device validation error:', error);
+    res.status(500).json({
+      canLogin: false,
+      error: 'Server error',
+      message: 'Unable to validate device. Please try again.'
+    });
+  }
+});
+
+// Reset device binding for a student (Teacher action)
+app.post('/api/students/:studentId/reset-device', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    console.log(`🔓 Resetting device binding for student: ${studentId}`);
+
+    const { data: student, error } = await supabaseAdmin
+      .from('students')
+      .update({ device_id: null })
+      .eq('student_id', studentId)
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Student not found' });
+      }
+      throw error;
+    }
+
+    console.log(`✅ Device binding reset for student: ${studentId}`);
+    res.json({ 
+      success: true, 
+      message: `Device binding reset for ${studentId}`,
+      student 
+    });
+
+  } catch (error) {
+    console.error('❌ Reset device error:', error);
+    res.status(500).json({ error: 'Failed to reset device binding' });
+  }
+});
 
 // Get student summary for home screen
 app.get('/api/students/:studentId/summary', async (req, res) => {
@@ -291,6 +466,147 @@ app.get('/api/students/:studentId/history', async (req, res) => {
   } catch (error) {
     console.error('❌ Get student history error:', error);
     res.status(500).json({ error: 'Failed to get history' });
+  }
+});
+
+// Get student profile
+app.get('/api/students/:studentId/profile', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    const { data: student, error } = await supabaseAdmin
+      .from('students')
+      .select('*')
+      .eq('student_id', studentId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Check if profile is complete (has name that's not auto-generated)
+    const isProfileComplete = student.name && 
+      !student.name.startsWith('Student ') && 
+      student.name !== studentId;
+
+    res.json({
+      studentId: student.student_id,
+      name: student.name,
+      email: student.email,
+      year: student.year,
+      section: student.section,
+      department: student.department,
+      deviceId: student.device_id,
+      isProfileComplete,
+      createdAt: student.created_at
+    });
+
+  } catch (error) {
+    console.error('❌ Get student profile error:', error);
+    res.status(500).json({ error: 'Failed to get profile' });
+  }
+});
+
+// Update student profile (one-time setup)
+app.put('/api/students/:studentId/profile', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { name, email, year, section, department } = req.body;
+
+    if (!name || name.trim().length < 2) {
+      return res.status(400).json({ error: 'Name is required (min 2 characters)' });
+    }
+
+    // Check if student exists
+    const { data: existing } = await supabaseAdmin
+      .from('students')
+      .select('name')
+      .eq('student_id', studentId)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Check if profile was already set (not auto-generated name)
+    const wasAlreadySet = existing.name && 
+      !existing.name.startsWith('Student ') && 
+      existing.name !== studentId;
+
+    if (wasAlreadySet) {
+      return res.status(403).json({ 
+        error: 'Profile already set',
+        message: 'Profile can only be set once. Contact your teacher to make changes.'
+      });
+    }
+
+    // Update profile
+    const { data: updated, error } = await supabaseAdmin
+      .from('students')
+      .update({
+        name: name.trim(),
+        email: email?.trim() || null,
+        year: year ? parseInt(year) : null,
+        section: section?.trim() || null,
+        department: department?.trim() || null
+      })
+      .eq('student_id', studentId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ Profile updated for student: ${studentId}`);
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      profile: {
+        studentId: updated.student_id,
+        name: updated.name,
+        email: updated.email,
+        year: updated.year,
+        section: updated.section,
+        department: updated.department
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Update profile error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Update student profile (Teacher/Admin - can always update)
+app.put('/api/students/:studentId/profile/admin', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { name, email, year, section, department } = req.body;
+
+    const { data: updated, error } = await supabaseAdmin
+      .from('students')
+      .update({
+        name: name?.trim() || undefined,
+        email: email?.trim() || null,
+        year: year ? parseInt(year) : null,
+        section: section?.trim() || null,
+        department: department?.trim() || null
+      })
+      .eq('student_id', studentId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ Profile updated by admin for student: ${studentId}`);
+
+    res.json({ success: true, student: updated });
+
+  } catch (error) {
+    console.error('❌ Admin update profile error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
   }
 });
 

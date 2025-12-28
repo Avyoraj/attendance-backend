@@ -186,16 +186,20 @@ exports.endSession = async (req, res) => {
 /**
  * Get active session by beacon (for Flutter app)
  * GET /api/sessions/active/beacon/:major/:minor
+ * 
+ * DEMO MODE: If no active session exists, auto-creates one for smooth demo
  */
 exports.getActiveSessionByBeacon = async (req, res) => {
   try {
     const major = parseInt(req.params.major);
     const minor = parseInt(req.params.minor);
+    const demoMode = req.query.demo === 'true' || process.env.DEMO_MODE === 'true';
 
     if (isNaN(major) || isNaN(minor)) {
       return res.status(400).json({ error: 'Invalid beacon major/minor' });
     }
 
+    // First, try to find an existing active session
     const { data: session, error } = await supabaseAdmin
       .from('sessions')
       .select('*')
@@ -204,23 +208,119 @@ exports.getActiveSessionByBeacon = async (req, res) => {
       .eq('status', 'active')
       .single();
 
-    if (error || !session) {
-      return res.status(404).json({
-        error: 'No active session',
-        message: 'No class is currently in progress in this room'
+    if (session) {
+      // Active session found - return it
+      return res.json({
+        hasActiveSession: true,
+        session: {
+          sessionId: session.id,
+          classId: session.class_id,
+          className: session.class_name,
+          teacherName: session.teacher_name,
+          roomId: session.room_id,
+          startedAt: session.actual_start
+        }
       });
     }
 
-    res.json({
-      hasActiveSession: true,
-      session: {
-        sessionId: session.id,
-        classId: session.class_id,
-        className: session.class_name,
-        teacherName: session.teacher_name,
-        roomId: session.room_id,
-        startedAt: session.actual_start
+    // No active session - check if demo mode should auto-create one
+    if (demoMode || process.env.DEMO_MODE === 'true') {
+      console.log(`🎯 DEMO MODE: No active session for beacon ${major}/${minor}, auto-creating...`);
+      
+      // Find the room for this beacon
+      const { data: room } = await supabaseAdmin
+        .from('rooms')
+        .select('*')
+        .eq('beacon_major', major)
+        .eq('beacon_minor', minor)
+        .single();
+
+      if (!room) {
+        return res.status(404).json({
+          error: 'No active session',
+          message: 'No room configured for this beacon',
+          demoMode: true
+        });
       }
+
+      // Find a class to use (first available or create demo class)
+      let classInfo;
+      const { data: classes } = await supabaseAdmin
+        .from('classes')
+        .select('*')
+        .eq('is_active', true)
+        .limit(1);
+
+      if (classes && classes.length > 0) {
+        classInfo = classes[0];
+      } else {
+        // Create a demo class
+        const { data: newClass } = await supabaseAdmin
+          .from('classes')
+          .insert({
+            class_id: 'DEMO_CLASS',
+            name: 'Demo Class',
+            subject: 'Demo Subject',
+            is_active: true
+          })
+          .select()
+          .single();
+        classInfo = newClass;
+      }
+
+      if (!classInfo) {
+        return res.status(404).json({
+          error: 'No active session',
+          message: 'Could not create demo session - no class available',
+          demoMode: true
+        });
+      }
+
+      // Auto-create a demo session
+      const { data: demoSession, error: createError } = await supabaseAdmin
+        .from('sessions')
+        .insert({
+          room_id: room.room_id,
+          class_id: classInfo.class_id,
+          class_name: classInfo.name,
+          teacher_id: null,
+          teacher_name: 'Demo Teacher (Auto)',
+          beacon_major: major,
+          beacon_minor: minor,
+          status: 'active'
+        })
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('❌ Failed to create demo session:', createError);
+        return res.status(404).json({
+          error: 'No active session',
+          message: 'Failed to create demo session'
+        });
+      }
+
+      console.log(`✅ DEMO MODE: Auto-created session for ${classInfo.name} in ${room.name}`);
+
+      return res.json({
+        hasActiveSession: true,
+        demoMode: true,
+        autoCreated: true,
+        session: {
+          sessionId: demoSession.id,
+          classId: demoSession.class_id,
+          className: demoSession.class_name,
+          teacherName: demoSession.teacher_name,
+          roomId: demoSession.room_id,
+          startedAt: demoSession.actual_start
+        }
+      });
+    }
+
+    // No session and not in demo mode
+    return res.status(404).json({
+      error: 'No active session',
+      message: 'No class is currently in progress in this room. Ask your teacher to start the session.'
     });
 
   } catch (error) {

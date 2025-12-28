@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Environment files (will be set in Northflank)
+.env
+.env.*
+!.env.example
+
+# Git
+.git
+.gitignore
+
+# Development files
+*.md
+*.txt
+.vscode
+.idea
+
+# Test files
+tests/
+*.test.js
+*.spec.js
+
+# Local database (using Supabase in production)
+*.db
+*.sqlite
+attendance.db
+
+# Postman collections
+postman/
+
+# Debug/test scripts (keep seed script)
+debug-*.js
+test-*.js
+simple-test.js
+
+# OS files
+.DS_Store
+Thumbs.db
