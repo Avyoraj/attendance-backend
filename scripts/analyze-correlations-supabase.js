@@ -115,11 +115,16 @@ async function analyzeCorrelations(classId = null, sessionDate = null) {
     console.log('\n' + '='.repeat(60));
     console.log('✅ ANALYSIS COMPLETE');
     console.log('='.repeat(60));
+    console.log(`📊 Total streams: ${streams.length}`);
     console.log(`📊 Total pairs analyzed: ${totalAnalyzed}`);
     console.log(`🚨 Total anomalies flagged: ${totalFlagged}`);
     console.log('='.repeat(60) + '\n');
 
-    return { analyzed: totalAnalyzed, flagged: totalFlagged };
+    return { 
+      streams: streams.length,
+      analyzed: totalAnalyzed, 
+      flagged: totalFlagged 
+    };
 
   } catch (error) {
     console.error('\n❌ ERROR:', error);

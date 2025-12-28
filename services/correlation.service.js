@@ -19,8 +19,9 @@ class CorrelationService {
    * @returns {Object} { correlation, aligned1, aligned2, commonTimestamps }
    */
   computePearsonCorrelation(rssiData1, rssiData2) {
-    // 1. Align time series (match by timestamp)
-    const { aligned1, aligned2, timestamps } = this.alignTimeSeries(rssiData1, rssiData2);
+    // 1. Align time series (match by timestamp or sliding window)
+    const alignResult = this.alignTimeSeries(rssiData1, rssiData2);
+    const { aligned1, aligned2, timestamps, method: alignmentMethod } = alignResult;
 
     // 2. Check if we have enough data points
     if (aligned1.length < 10) {
@@ -31,7 +32,8 @@ class CorrelationService {
         dataPoints: aligned1.length,
         aligned1,
         aligned2,
-        commonTimestamps: timestamps
+        commonTimestamps: timestamps,
+        alignmentMethod: alignmentMethod || 'unknown'
       };
     }
 
@@ -48,7 +50,7 @@ class CorrelationService {
     // If both signals are flat AND close together, it's suspicious
     const stationaryCheck = this.checkStationaryProxy(aligned1, aligned2, mean1, mean2, stdDev1, stdDev2);
 
-    console.log(`📊 Correlation computed: ρ = ${correlation.toFixed(4)} (${aligned1.length} data points)`);
+    console.log(`📊 Correlation computed: ρ = ${correlation.toFixed(4)} (${aligned1.length} data points, method: ${alignmentMethod || 'timestamp'})`);
     if (stationaryCheck.isStationary) {
       console.log(`🪑 Stationary detection: both devices stable, mean diff = ${stationaryCheck.meanDifference.toFixed(2)} dBm`);
     }
@@ -63,7 +65,8 @@ class CorrelationService {
       aligned1,
       aligned2,
       commonTimestamps: timestamps,
-      stationaryCheck
+      stationaryCheck,
+      alignmentMethod: alignmentMethod || 'timestamp'
     };
   }
 
@@ -141,14 +144,38 @@ class CorrelationService {
   }
 
   /**
-   * Align two RSSI time series by matching timestamps
+   * Align two RSSI time series using SLIDING WINDOW approach
+   * This works even when phones start at different times!
+   * 
+   * Strategy:
+   * 1. First try timestamp-based alignment (if timestamps match well)
+   * 2. If that fails, use sequence-based sliding window correlation
    * 
    * @param {Array} rssiData1 - [{timestamp: Date, rssi: Number}, ...]
    * @param {Array} rssiData2 - [{timestamp: Date, rssi: Number}, ...]
-   * @returns {Object} { aligned1, aligned2, timestamps }
+   * @returns {Object} { aligned1, aligned2, timestamps, method }
    */
   alignTimeSeries(rssiData1, rssiData2) {
-    // Convert timestamps to milliseconds for comparison
+    // First, try timestamp-based alignment
+    const timestampResult = this.alignByTimestamp(rssiData1, rssiData2);
+    
+    // If we got enough aligned points (at least 10), use timestamp alignment
+    if (timestampResult.aligned1.length >= 10) {
+      console.log(`🔗 Timestamp alignment: ${timestampResult.aligned1.length} common points`);
+      return { ...timestampResult, method: 'timestamp' };
+    }
+    
+    // Otherwise, use sliding window sequence-based alignment
+    console.log(`⚠️ Timestamp alignment failed (${timestampResult.aligned1.length} points), using sliding window...`);
+    const slidingResult = this.alignBySlidingWindow(rssiData1, rssiData2);
+    
+    return { ...slidingResult, method: 'sliding_window' };
+  }
+
+  /**
+   * Original timestamp-based alignment (with ±2 second tolerance)
+   */
+  alignByTimestamp(rssiData1, rssiData2) {
     const map1 = new Map();
     const map2 = new Map();
 
@@ -162,44 +189,156 @@ class CorrelationService {
       map2.set(timeKey, item.rssi);
     });
 
-    // Find common timestamps (with tolerance of ±2 seconds)
     const aligned1 = [];
     const aligned2 = [];
     const timestamps = [];
-    const tolerance = 2000; // 2 seconds in milliseconds
+    const tolerance = 2000; // 2 seconds
 
     const times1 = Array.from(map1.keys()).sort((a, b) => a - b);
     const times2 = Array.from(map2.keys()).sort((a, b) => a - b);
 
-    // Match timestamps within tolerance window using two-pointer approach
-    // This ensures 1-to-1 matching (no data duplication)
     let ptr2 = 0;
-
     for (const t1 of times1) {
-      // Advance ptr2 to the first potential match (t2 >= t1 - tolerance)
       while (ptr2 < times2.length && times2[ptr2] < t1 - tolerance) {
         ptr2++;
       }
-
-      // Check if we ran out of data in times2
       if (ptr2 >= times2.length) break;
 
       const t2 = times2[ptr2];
-
-      // Check if t2 is within valid range (t2 <= t1 + tolerance)
       if (t2 <= t1 + tolerance) {
         aligned1.push(map1.get(t1));
         aligned2.push(map2.get(t2));
         timestamps.push(new Date(t1));
-        
-        // Move pointer to prevent reusing this t2 (1-to-1 matching)
         ptr2++;
       }
     }
 
-    console.log(`🔗 Aligned ${aligned1.length} common data points from ${rssiData1.length} and ${rssiData2.length} readings`);
-
     return { aligned1, aligned2, timestamps };
+  }
+
+  /**
+   * Sliding window sequence-based alignment
+   * Finds the best alignment between two RSSI sequences regardless of start time
+   * 
+   * How it works:
+   * 1. Extract RSSI values as ordered sequences (sorted by timestamp)
+   * 2. Slide the shorter sequence over the longer one
+   * 3. At each position, compute correlation
+   * 4. Return the alignment with highest correlation
+   */
+  alignBySlidingWindow(rssiData1, rssiData2) {
+    // Sort by timestamp and extract RSSI values
+    const sorted1 = [...rssiData1].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const sorted2 = [...rssiData2].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    const seq1 = sorted1.map(d => d.rssi);
+    const seq2 = sorted2.map(d => d.rssi);
+    
+    console.log(`📊 Sliding window: seq1=${seq1.length} points, seq2=${seq2.length} points`);
+    
+    // Minimum window size for meaningful correlation
+    const MIN_WINDOW = 10;
+    
+    if (seq1.length < MIN_WINDOW || seq2.length < MIN_WINDOW) {
+      console.log(`⚠️ Sequences too short for sliding window (need ${MIN_WINDOW})`);
+      return { aligned1: [], aligned2: [], timestamps: [] };
+    }
+    
+    // Determine which is longer/shorter
+    const [longer, shorter, longerSorted, shorterSorted] = seq1.length >= seq2.length 
+      ? [seq1, seq2, sorted1, sorted2] 
+      : [seq2, seq1, sorted2, sorted1];
+    
+    let bestCorrelation = -2; // Start below minimum possible (-1)
+    let bestOffset = 0;
+    let bestWindowSize = MIN_WINDOW;
+    
+    // Window size: use the shorter sequence length, but cap at reasonable size
+    const windowSize = Math.min(shorter.length, longer.length, 60); // Max 60 points (~5 min at 5s intervals)
+    
+    // Slide the window across all possible positions
+    const maxOffset = longer.length - windowSize + 1;
+    
+    console.log(`🔄 Testing ${maxOffset} window positions (window size: ${windowSize})`);
+    
+    for (let offset = 0; offset < maxOffset; offset++) {
+      // Extract windows
+      const window1 = longer.slice(offset, offset + windowSize);
+      const window2 = shorter.slice(0, windowSize);
+      
+      // Quick correlation calculation
+      const corr = this.quickCorrelation(window1, window2);
+      
+      if (corr !== null && corr > bestCorrelation) {
+        bestCorrelation = corr;
+        bestOffset = offset;
+        bestWindowSize = windowSize;
+      }
+    }
+    
+    // Also try sliding shorter over longer (reverse direction)
+    const maxOffset2 = shorter.length - windowSize + 1;
+    for (let offset = 0; offset < maxOffset2; offset++) {
+      const window1 = longer.slice(0, windowSize);
+      const window2 = shorter.slice(offset, offset + windowSize);
+      
+      const corr = this.quickCorrelation(window1, window2);
+      
+      if (corr !== null && corr > bestCorrelation) {
+        bestCorrelation = corr;
+        bestOffset = -offset; // Negative to indicate reverse direction
+        bestWindowSize = windowSize;
+      }
+    }
+    
+    console.log(`✅ Best alignment: offset=${bestOffset}, correlation=${bestCorrelation.toFixed(4)}`);
+    
+    // Extract the best aligned sequences
+    let aligned1, aligned2, timestamps;
+    
+    if (bestOffset >= 0) {
+      aligned1 = longer.slice(bestOffset, bestOffset + bestWindowSize);
+      aligned2 = shorter.slice(0, bestWindowSize);
+      timestamps = longerSorted.slice(bestOffset, bestOffset + bestWindowSize).map(d => new Date(d.timestamp));
+    } else {
+      aligned1 = longer.slice(0, bestWindowSize);
+      aligned2 = shorter.slice(-bestOffset, -bestOffset + bestWindowSize);
+      timestamps = longerSorted.slice(0, bestWindowSize).map(d => new Date(d.timestamp));
+    }
+    
+    // Swap back if we swapped earlier
+    if (seq1.length < seq2.length) {
+      [aligned1, aligned2] = [aligned2, aligned1];
+    }
+    
+    console.log(`🔗 Sliding window aligned ${aligned1.length} points (best corr: ${bestCorrelation.toFixed(4)})`);
+    
+    return { aligned1, aligned2, timestamps, slidingCorrelation: bestCorrelation };
+  }
+
+  /**
+   * Quick correlation calculation for sliding window search
+   * Simplified Pearson correlation without all the extra checks
+   */
+  quickCorrelation(data1, data2) {
+    if (data1.length !== data2.length || data1.length < 5) return null;
+    
+    const n = data1.length;
+    let sum1 = 0, sum2 = 0, sum1Sq = 0, sum2Sq = 0, pSum = 0;
+    
+    for (let i = 0; i < n; i++) {
+      sum1 += data1[i];
+      sum2 += data2[i];
+      sum1Sq += data1[i] * data1[i];
+      sum2Sq += data2[i] * data2[i];
+      pSum += data1[i] * data2[i];
+    }
+    
+    const num = pSum - (sum1 * sum2 / n);
+    const den = Math.sqrt((sum1Sq - sum1 * sum1 / n) * (sum2Sq - sum2 * sum2 / n));
+    
+    if (den === 0) return 0;
+    return num / den;
   }
 
   /**
