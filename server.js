@@ -255,6 +255,30 @@ app.put('/api/anomalies/:id/review', async (req, res) => {
   }
 });
 
+// Get today's RSSI streams for live monitoring
+app.get('/api/rssi/streams/today', async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    
+    const { data: streams, error } = await supabaseAdmin
+      .from('rssi_streams')
+      .select('student_id, class_id, session_date, sample_count, created_at, updated_at')
+      .eq('session_date', today)
+      .order('updated_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    res.json({ 
+      streams: streams || [],
+      date: today,
+      count: streams?.length || 0
+    });
+  } catch (error) {
+    console.error('❌ Get today streams error:', error);
+    res.status(500).json({ error: 'Failed to fetch today streams' });
+  }
+});
+
 // Get RSSI streams for anomaly visualization
 app.get('/api/rssi-streams/:classId/:date', async (req, res) => {
   try {
