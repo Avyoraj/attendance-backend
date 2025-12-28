@@ -27,24 +27,32 @@ const app = express();
 // 🔒 SECURITY & MIDDLEWARE
 // ==========================================
 
-app.use(helmet());
+// CORS - Must be FIRST before any other middleware
+// Allow all origins for now (can restrict later)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Handle preflight OPTIONS request
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
-// CORS configuration for production
-const corsOptions = {
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'https://attendance-system-react-livid.vercel.app',
-    'https://attendance-backend-omega.vercel.app'
-  ],
+// Also use cors middleware as backup
+app.use(cors({
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
   credentials: true
-};
-app.use(cors(corsOptions));
+}));
 
-// Handle preflight requests
-app.options('*', cors(corsOptions));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 
 app.use(express.json());
 app.use(express.static('public'));
