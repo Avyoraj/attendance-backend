@@ -74,8 +74,8 @@ class CorrelationService {
    * - Similar average RSSI (same location)
    */
   checkStationaryProxy(data1, data2, mean1, mean2, stdDev1, stdDev2) {
-    const STATIONARY_THRESHOLD = 3;    // StdDev below this = stationary
-    const MEAN_DIFF_THRESHOLD = 5;     // If means within 5 dBm = same location
+    const STATIONARY_THRESHOLD = 5;    // StdDev below this = stationary (increased from 3)
+    const MEAN_DIFF_THRESHOLD = 8;     // If means within 8 dBm = same location (increased from 5)
     
     const isStationary1 = stdDev1 < STATIONARY_THRESHOLD;
     const isStationary2 = stdDev2 < STATIONARY_THRESHOLD;
@@ -89,11 +89,13 @@ class CorrelationService {
       isStationary,
       isStationary1,
       isStationary2,
+      stdDev1,
+      stdDev2,
       meanDifference,
       isSameLocation,
       isSuspiciousStationary,
       reason: isSuspiciousStationary 
-        ? 'Both devices stationary at same location (desk scenario)' 
+        ? `Both devices stationary at same location (stdDev: ${stdDev1.toFixed(2)}, ${stdDev2.toFixed(2)}, mean diff: ${meanDifference.toFixed(2)} dBm)` 
         : null
     };
   }
@@ -233,8 +235,8 @@ class CorrelationService {
    * @returns {Object} { suspicious, reason }
    */
   isSuspicious(correlation, stationaryCheck = null) {
-    // High correlation = moving together
-    if (Math.abs(correlation) >= 0.9) {
+    // High correlation = moving together (lowered threshold from 0.9 to 0.85)
+    if (Math.abs(correlation) >= 0.85) {
       return {
         suspicious: true,
         reason: 'high_correlation',
@@ -247,7 +249,7 @@ class CorrelationService {
       return {
         suspicious: true,
         reason: 'stationary_proxy',
-        description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm)`
+        description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm, stdDev: ${stationaryCheck.stdDev1?.toFixed(2) || 'N/A'}, ${stationaryCheck.stdDev2?.toFixed(2) || 'N/A'})`
       };
     }
     
