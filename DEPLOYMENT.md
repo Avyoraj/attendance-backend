@@ -11,34 +11,30 @@
 - **Dockerfile Path**: `Dockerfile`
 - **Build Context**: `attendance-backend`
 
-### 3. Environment Variables (Add in Northflank)
+### 3. Build Arguments (Leave Empty)
+No build arguments needed - the Dockerfile handles everything.
 
-```env
-# Supabase Configuration (REQUIRED)
-SUPABASE_URL=https://xutqesrorqiztfkowdyh.supabase.co
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1dHFlc3JvcnFpenRma293ZHloIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3MTU5NzksImV4cCI6MjA4MjI5MTk3OX0.PTrKWtH8fgGzZmgRH6q1xkKzwbIPrjJR4tdeAo2qzNc
-SUPABASE_SERVICE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1dHFlc3JvcnFpenRma293ZHloIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjcxNTk3OSwiZXhwIjoyMDgyMjkxOTc5fQ.84y4HY6JpVZeO7324S9uYI_Uryqpj50ujhFBjoAt-F8
+### 4. Runtime Variables (Add ALL of these)
 
-# JWT Secret (for teacher auth)
-JWT_SECRET=your-secure-jwt-secret-change-this-in-production
+| Variable | Value |
+|----------|-------|
+| `SUPABASE_URL` | `https://xutqesrorqiztfkowdyh.supabase.co` |
+| `SUPABASE_ANON_KEY` | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1dHFlc3JvcnFpenRma293ZHloIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3MTU5NzksImV4cCI6MjA4MjI5MTk3OX0.PTrKWtH8fgGzZmgRH6q1xkKzwbIPrjJR4tdeAo2qzNc` |
+| `SUPABASE_SERVICE_KEY` | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1dHFlc3JvcnFpenRma293ZHloIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjcxNTk3OSwiZXhwIjoyMDgyMjkxOTc5fQ.84y4HY6JpVZeO7324S9uYI_Uryqpj50ujhFBjoAt-F8` |
+| `JWT_SECRET` | `attendance-system-secret-key-2024` |
+| `PORT` | `3000` |
+| `NODE_ENV` | `production` |
+| `DEMO_MODE` | `true` |
 
-# Server Configuration
-PORT=3000
-NODE_ENV=production
-
-# Demo Mode (keep enabled for project demo)
-DEMO_MODE=true
-```
-
-### 4. Port Configuration
+### 5. Port Configuration
 - **Internal Port**: 3000
 - **Public Port**: 443 (HTTPS)
 
-### 5. Health Check
+### 6. Health Check
 - **Path**: `/api/health`
 - **Interval**: 30s
 
-### 6. After Deployment
+### 7. After Deployment
 Note your Northflank URL, e.g.: `https://your-app.northflank.app`
 
 ---
