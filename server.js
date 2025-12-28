@@ -151,6 +151,42 @@ app.get('/api/attendance/history', require('./controllers/attendance.controller'
 // 🔍 ANOMALY ENDPOINTS (Proxy Detection)
 // ==========================================
 
+// Check if student is flagged for proxy (for Flutter app)
+app.get('/api/anomalies/check/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const today = new Date().toISOString().split('T')[0];
+    
+    const { data: anomalies, error } = await supabaseAdmin
+      .from('anomalies')
+      .select('*')
+      .eq('status', 'pending')
+      .eq('session_date', today)
+      .or(`student_id_1.eq.${studentId},student_id_2.eq.${studentId}`);
+    
+    if (error) throw error;
+    
+    if (anomalies && anomalies.length > 0) {
+      const anomaly = anomalies[0];
+      const otherStudent = anomaly.student_id_1 === studentId ? anomaly.student_id_2 : anomaly.student_id_1;
+      
+      return res.json({
+        flagged: true,
+        message: `Suspicious pattern detected with ${otherStudent}`,
+        anomalyId: anomaly.id,
+        correlationScore: anomaly.correlation_score,
+        otherStudent,
+        severity: anomaly.severity
+      });
+    }
+    
+    res.json({ flagged: false, message: 'No anomalies detected' });
+  } catch (error) {
+    console.error('❌ Check anomaly error:', error);
+    res.status(500).json({ error: 'Failed to check anomalies' });
+  }
+});
+
 // Get anomalies with filters
 app.get('/api/anomalies', async (req, res) => {
   try {

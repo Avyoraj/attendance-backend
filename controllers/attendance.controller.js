@@ -151,6 +151,7 @@ exports.checkIn = async (req, res) => {
 
 /**
  * Confirm provisional attendance
+ * BLOCKS confirmation if student is flagged in a pending proxy anomaly
  */
 exports.confirmAttendance = async (req, res) => {
   try {
@@ -162,6 +163,30 @@ exports.confirmAttendance = async (req, res) => {
     }
 
     const today = new Date().toISOString().split('T')[0];
+
+    // 🚨 CHECK FOR PENDING PROXY ANOMALIES - Block if flagged
+    const { data: pendingAnomalies } = await supabaseAdmin
+      .from('anomalies')
+      .select('*')
+      .eq('status', 'pending')
+      .eq('session_date', today)
+      .or(`student_id_1.eq.${studentId},student_id_2.eq.${studentId}`);
+
+    if (pendingAnomalies && pendingAnomalies.length > 0) {
+      const anomaly = pendingAnomalies[0];
+      const otherStudent = anomaly.student_id_1 === studentId ? anomaly.student_id_2 : anomaly.student_id_1;
+      
+      console.log(`🚫 BLOCKED: ${studentId} flagged for proxy with ${otherStudent} (ρ=${anomaly.correlation_score})`);
+      
+      return res.status(403).json({
+        success: false,
+        error: 'PROXY_DETECTED',
+        message: `Attendance blocked: Suspicious pattern detected with ${otherStudent}. Please see your teacher.`,
+        anomalyId: anomaly.id,
+        correlationScore: anomaly.correlation_score,
+        otherStudent
+      });
+    }
 
     // Find attendance record
     let query = supabaseAdmin
