@@ -544,3 +544,70 @@ exports.getHistory = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch history' });
   }
 };
+
+/**
+ * Get ALL today's attendance (simplified demo mode - no session activator needed)
+ * Shows all attendance records for today across all classes
+ */
+exports.getTodayAllAttendance = async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // Get all attendance for today with student info
+    const { data: attendance, error } = await supabaseAdmin
+      .from('attendance')
+      .select('*')
+      .eq('session_date', today)
+      .order('check_in_time', { ascending: false });
+
+    if (error) throw error;
+
+    // Get student names for display
+    const studentIds = [...new Set((attendance || []).map(a => a.student_id))];
+    let studentMap = {};
+    
+    if (studentIds.length > 0) {
+      const { data: students } = await supabaseAdmin
+        .from('students')
+        .select('student_id, name')
+        .in('student_id', studentIds);
+      
+      studentMap = (students || []).reduce((acc, s) => {
+        acc[s.student_id] = s.name;
+        return acc;
+      }, {});
+    }
+
+    // Format response
+    const formatted = (attendance || []).map(record => ({
+      id: record.id,
+      studentId: record.student_id,
+      studentName: studentMap[record.student_id] || record.student_id,
+      classId: record.class_id,
+      status: record.status,
+      checkInTime: record.check_in_time,
+      confirmedAt: record.confirmed_at,
+      rssi: record.rssi,
+      distance: record.distance
+    }));
+
+    // Summary stats
+    const summary = {
+      total: formatted.length,
+      confirmed: formatted.filter(a => a.status === 'confirmed').length,
+      provisional: formatted.filter(a => a.status === 'provisional').length,
+      cancelled: formatted.filter(a => a.status === 'cancelled').length
+    };
+
+    res.status(200).json({
+      success: true,
+      date: today,
+      summary,
+      attendance: formatted
+    });
+
+  } catch (error) {
+    console.error('❌ Get today all attendance error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch attendance' });
+  }
+};

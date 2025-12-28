@@ -10,6 +10,9 @@ const express = require('express');
 const router = express.Router();
 const attendanceController = require('../controllers/attendance.controller');
 
+// Get ALL today's attendance (simplified demo - no session activator needed)
+router.get('/today-all', attendanceController.getTodayAllAttendance);
+
 // Get today's attendance for student
 router.get('/today/:studentId', attendanceController.getTodayAttendance);
 
