@@ -5,24 +5,9 @@
  * Run with: node scripts/seed-demo-data.js
  */
 
-require('dotenv').config();
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-
-const Room = require('../models/Room');
-const Teacher = require('../models/Teacher');
-const Class = require('../models/Class');
-const Student = require('../models/Student');
-
-const MONGO_URI = process.env.MONGODB_URI || process.env.DATABASE_URL;
-
-async function seedData() {
-  try {
-    console.log('🌱 Starting seed process...\n');
-    
-    // Connect to MongoDB
-    await mongoose.connect(MONGO_URI);
-    console.log('✅ Connected to MongoDB\n');
+// Deprecated Mongo seed script. Supabase is now the canonical datastore.
+// Use `npm run seed` (scripts/setup-supabase.js) instead.
+throw new Error('Mongo seed script is deprecated. Use Supabase seed (scripts/setup-supabase.js) instead.');
 
     // 1. Create Rooms
     console.log('📍 Creating rooms...');

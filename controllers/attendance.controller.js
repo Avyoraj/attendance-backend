@@ -5,13 +5,24 @@
  */
 
 const { supabaseAdmin } = require('../utils/supabase');
+const { verifyDeviceSignature } = require('../utils/security');
+const { stableHash, findKey, persistKey } = require('../utils/idempotency');
+
+// ------------------------------------------------------------------
+// ⚙️ CONFIGURATION SWITCH
+// ------------------------------------------------------------------
+// Set to TRUE for Demo (3 mins), FALSE for Production (30 mins)
+const IS_DEMO_MODE = true; 
+
+const CONFIRMATION_WINDOW_SECONDS = IS_DEMO_MODE ? 180 : 1800; // 3 mins vs 30 mins
+// ------------------------------------------------------------------
 
 /**
  * Check-in (provisional attendance)
  */
 exports.checkIn = async (req, res) => {
   try {
-    const { studentId, classId, deviceIdHash, deviceId: legacyDeviceId, rssi, distance, beaconMajor, beaconMinor } = req.body;
+    const { studentId, classId, eventId, deviceSignature, deviceSaltVersion = 'v1', deviceIdHash, deviceId: legacyDeviceId, rssi, distance, beaconMajor, beaconMinor } = req.body;
     const deviceId = deviceIdHash || legacyDeviceId || null;
 
     if (!studentId || !classId) {
@@ -21,7 +32,49 @@ exports.checkIn = async (req, res) => {
       });
     }
 
+    if (!eventId || !deviceId) {
+      return res.status(400).json({
+        error: 'BAD_REQUEST',
+        message: 'Missing required field(s): eventId or deviceId'
+      });
+    }
+
     const today = new Date().toISOString().split('T')[0];
+
+    // Verify device signature (HMAC) to prevent spoofing
+    const { valid: signatureValid } = verifyDeviceSignature({
+      deviceId,
+      signature: deviceSignature,
+      version: deviceSaltVersion
+    });
+
+    if (!signatureValid) {
+      return res.status(401).json({
+        success: false,
+        error: 'INVALID_DEVICE_SIGNATURE',
+        message: 'Device signature invalid or missing'
+      });
+    }
+
+    // Idempotency check
+    const scope = `checkin:${studentId}:${classId}:${today}`;
+    const requestHash = stableHash({ studentId, classId, deviceId, eventId, beaconMajor, beaconMinor });
+    const existingKey = await findKey(eventId, scope);
+
+    if (existingKey) {
+      if (existingKey.request_hash !== requestHash) {
+        return res.status(409).json({
+          success: false,
+          error: 'IDEMPOTENCY_CONFLICT',
+          message: 'Event already used with a different payload'
+        });
+      }
+
+      return res.status(existingKey.status_code || 200).json(existingKey.response || {
+        success: true,
+        message: 'Attendance already recorded'
+      });
+    }
 
     // Check device binding
     if (deviceId) {
@@ -75,7 +128,7 @@ exports.checkIn = async (req, res) => {
       .single();
 
     if (existing) {
-      const confirmationWindowSeconds = 3 * 60;
+      const confirmationWindowSeconds = CONFIRMATION_WINDOW_SECONDS;
       const now = new Date();
       let remainingSeconds = 0;
       
@@ -109,6 +162,7 @@ exports.checkIn = async (req, res) => {
         class_id: classId,
         device_id: deviceId || student?.device_id,
         status: 'provisional',
+        event_id: eventId,
         rssi: rssi || -70,
         distance: distance || null,
         beacon_major: beaconMajor || null,
@@ -127,11 +181,11 @@ exports.checkIn = async (req, res) => {
 
     console.log(`✅ Attendance marked: ${studentId} in ${classId} (provisional)`);
 
-    res.status(201).json({
+    const responseBody = {
       success: true,
       message: 'Attendance recorded successfully',
       status: 'provisional',
-      remainingSeconds: 180,
+      remainingSeconds: CONFIRMATION_WINDOW_SECONDS,
       attendance: {
         id: attendance.id,
         studentId: attendance.student_id,
@@ -140,7 +194,17 @@ exports.checkIn = async (req, res) => {
         checkInTime: attendance.check_in_time,
         rssi: attendance.rssi
       }
+    };
+
+    await persistKey({
+      eventId,
+      scope,
+      requestHash,
+      response: responseBody,
+      statusCode: 201
     });
+
+    res.status(201).json(responseBody);
 
   } catch (error) {
     console.error('❌ Check-in error:', error);
@@ -150,45 +214,46 @@ exports.checkIn = async (req, res) => {
 
 
 /**
- * Confirm provisional attendance
- * BLOCKS confirmation if student is flagged in a pending proxy anomaly
+ * Confirm provisional attendance (Supabase-only)
+ * - Enforces provisional TTL (auto-cancel if stale)
+ * - Runs correlation check against today's/class streams; blocks if flagged unless teacher override
+ * - Respects device binding; supports optional teacherOverride flag
  */
 exports.confirmAttendance = async (req, res) => {
   try {
-    const { studentId, classId, attendanceId, deviceIdHash, deviceId: legacyDeviceId } = req.body;
+    const { studentId, classId, attendanceId, eventId, deviceSignature, deviceSaltVersion = 'v1', deviceIdHash, deviceId: legacyDeviceId, teacherOverride = false, overrideNote } = req.body;
     const deviceId = deviceIdHash || legacyDeviceId || null;
 
     if (!studentId || !classId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
-
-    // 🚨 CHECK FOR PENDING PROXY ANOMALIES - Block if flagged
-    const { data: pendingAnomalies } = await supabaseAdmin
-      .from('anomalies')
-      .select('*')
-      .eq('status', 'pending')
-      .eq('session_date', today)
-      .or(`student_id_1.eq.${studentId},student_id_2.eq.${studentId}`);
-
-    if (pendingAnomalies && pendingAnomalies.length > 0) {
-      const anomaly = pendingAnomalies[0];
-      const otherStudent = anomaly.student_id_1 === studentId ? anomaly.student_id_2 : anomaly.student_id_1;
-      
-      console.log(`🚫 BLOCKED: ${studentId} flagged for proxy with ${otherStudent} (ρ=${anomaly.correlation_score})`);
-      
-      return res.status(403).json({
-        success: false,
-        error: 'PROXY_DETECTED',
-        message: `Attendance blocked: Suspicious pattern detected with ${otherStudent}. Please see your teacher.`,
-        anomalyId: anomaly.id,
-        correlationScore: anomaly.correlation_score,
-        otherStudent
-      });
+    if (!eventId || !deviceId) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Find attendance record
+    const today = new Date().toISOString().split('T')[0];
+
+    const { valid: signatureValid } = verifyDeviceSignature({ deviceId, signature: deviceSignature, version: deviceSaltVersion });
+    if (!signatureValid) {
+      return res.status(401).json({ success: false, error: 'INVALID_DEVICE_SIGNATURE' });
+    }
+
+    const scope = `confirm:${studentId}:${classId}:${today}`;
+    const requestHash = stableHash({ studentId, classId, attendanceId, deviceId, eventId, teacherOverride });
+    const existingKey = await findKey(eventId, scope);
+
+    if (existingKey) {
+      if (existingKey.request_hash !== requestHash) {
+        return res.status(409).json({ success: false, error: 'IDEMPOTENCY_CONFLICT' });
+      }
+      return res.status(existingKey.status_code || 200).json(existingKey.response || { success: true, message: 'Already confirmed' });
+    }
+    
+    // Use the configured window (Demo vs Prod)
+    const confirmationWindowSeconds = CONFIRMATION_WINDOW_SECONDS;
+
+    // Find attendance record (provisional for today/class)
     let query = supabaseAdmin
       .from('attendance')
       .select('*')
@@ -211,6 +276,29 @@ exports.confirmAttendance = async (req, res) => {
       });
     }
 
+    // TTL enforcement: if provisional is older than window, cancel and stop
+    const checkInTime = attendance.check_in_time ? new Date(attendance.check_in_time) : null;
+    if (checkInTime) {
+      const elapsed = (Date.now() - checkInTime.getTime()) / 1000;
+      if (elapsed > confirmationWindowSeconds) {
+        // Auto-cancel stale provisional
+        await supabaseAdmin
+          .from('attendance')
+          .update({
+            status: 'cancelled',
+            cancelled_at: new Date().toISOString(),
+            cancellation_reason: 'Provisional expired before confirmation'
+          })
+          .eq('id', attendance.id);
+
+        return res.status(410).json({
+          success: false,
+          error: 'PROVISIONAL_EXPIRED',
+          message: 'Provisional attendance expired before confirmation.'
+        });
+      }
+    }
+
     // Device binding check
     if (deviceId) {
       const { data: student } = await supabaseAdmin
@@ -228,6 +316,42 @@ exports.confirmAttendance = async (req, res) => {
       }
     }
 
+    // If no teacher override, block if already pending anomaly or fresh correlation says suspicious
+    if (!teacherOverride) {
+      const { data: pendingAnomalies } = await supabaseAdmin
+        .from('anomalies')
+        .select('*')
+        .eq('status', 'pending')
+        .eq('session_date', today)
+        .or(`student_id_1.eq.${studentId},student_id_2.eq.${studentId}`)
+        .limit(1);
+
+      const existingAnomaly = pendingAnomalies?.[0];
+      if (existingAnomaly) {
+        const otherStudent = existingAnomaly.student_id_1 === studentId ? existingAnomaly.student_id_2 : existingAnomaly.student_id_1;
+        return res.status(403).json({
+          success: false,
+          error: 'PROXY_DETECTED',
+          message: `Attendance blocked: Suspicious pattern detected with ${otherStudent}. Please see your teacher.`,
+          anomalyId: existingAnomaly.id,
+          correlationScore: existingAnomaly.correlation_score,
+          otherStudent
+        });
+      }
+
+      const correlationResult = await runCorrelationCheckForStudent({ studentId, classId, sessionDate: today });
+      if (correlationResult?.flagged) {
+        return res.status(403).json({
+          success: false,
+          error: 'PROXY_DETECTED',
+          message: correlationResult.message,
+          anomalyId: correlationResult.anomalyId,
+          correlationScore: correlationResult.correlationScore,
+          otherStudent: correlationResult.otherStudent
+        });
+      }
+    }
+
     // Update to confirmed
     const { data: updated, error: updateError } = await supabaseAdmin
       .from('attendance')
@@ -241,18 +365,29 @@ exports.confirmAttendance = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    console.log(`✅ Attendance confirmed: ${studentId} in ${classId}`);
+    console.log(`✅ Attendance confirmed: ${studentId} in ${classId}${teacherOverride ? ' (override)' : ''}`);
 
-    res.status(200).json({
+    const responseBody = {
       success: true,
       message: 'Attendance confirmed successfully',
       attendance: {
         id: updated.id,
         status: updated.status,
         checkInTime: updated.check_in_time,
-        confirmedAt: updated.confirmed_at
+        confirmedAt: updated.confirmed_at,
+        override: !!teacherOverride
       }
+    };
+
+    await persistKey({
+      eventId,
+      scope,
+      requestHash,
+      response: responseBody,
+      statusCode: 200
     });
+
+    res.status(200).json(responseBody);
 
   } catch (error) {
     console.error('❌ Confirmation error:', error);
@@ -261,17 +396,176 @@ exports.confirmAttendance = async (req, res) => {
 };
 
 /**
+ * Run correlation check for a single student against others in the same class/session.
+ * Creates/updates anomalies when flagged.
+ */
+async function runCorrelationCheckForStudent({ studentId, classId, sessionDate }) {
+  // Quality gates
+  const MIN_SAMPLES = 10;
+  const MAX_OUTLIERS_TRIM = 0.05; // trim top/bottom 5%
+
+  // Load streams for class/session
+  const { data: streams, error } = await supabaseAdmin
+    .from('rssi_streams')
+    .select('*')
+    .eq('class_id', classId)
+    .eq('session_date', sessionDate)
+    .gte('sample_count', MIN_SAMPLES);
+
+  if (error) {
+    console.error('❌ Correlation load error:', error);
+    return null;
+  }
+
+  if (!streams || streams.length < 2) {
+    return null; // nothing to compare
+  }
+
+  const target = streams.find(s => s.student_id === studentId);
+  if (!target) return null;
+
+  const correlationService = require('../services/correlation.service');
+
+  const formattedTarget = formatRssiStream(target, MAX_OUTLIERS_TRIM);
+
+  let bestFlag = null;
+
+  for (const peer of streams) {
+    if (peer.student_id === studentId) continue;
+    const formattedPeer = formatRssiStream(peer, MAX_OUTLIERS_TRIM);
+    if (!formattedPeer || formattedPeer.rssiData.length < MIN_SAMPLES) continue;
+
+    const result = correlationService.computePearsonCorrelation(
+      formattedTarget.rssiData,
+      formattedPeer.rssiData
+    );
+
+    if (result.correlation === null) continue;
+
+    const severity = correlationService.determineSeverity(result.correlation);
+    const suspicious = correlationService.isSuspicious(result.correlation, result.stationaryCheck);
+
+    if (suspicious.suspicious) {
+      // Upsert anomaly
+      const { anomalyId } = await upsertAnomaly({
+        classId,
+        sessionDate,
+        student1: studentId,
+        student2: peer.student_id,
+        correlation: result.correlation,
+        severity,
+        dataPoints: result.dataPoints,
+        notes: suspicious.description
+      });
+
+      bestFlag = {
+        flagged: true,
+        anomalyId,
+        correlationScore: result.correlation,
+        otherStudent: peer.student_id,
+        message: `Attendance blocked: suspicious correlation with ${peer.student_id}. Please see your teacher.`
+      };
+      break; // block on first flag
+    }
+  }
+
+  return bestFlag;
+}
+
+function formatRssiStream(stream, trimRatio) {
+  const data = (stream.rssi_data || []).map(d => ({
+    timestamp: d.timestamp || d.t,
+    rssi: d.rssi ?? d.r
+  })).filter(d => d.rssi !== undefined && d.timestamp);
+
+  if (data.length === 0) return null;
+
+  // Trim outliers
+  const sorted = [...data].sort((a, b) => a.rssi - b.rssi);
+  const trimCount = Math.floor(sorted.length * trimRatio);
+  const trimmed = sorted.slice(trimCount, sorted.length - trimCount);
+  const ordered = trimmed.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+  return { ...stream, rssiData: ordered };
+}
+
+async function upsertAnomaly({ classId, sessionDate, student1, student2, correlation, severity, dataPoints, notes }) {
+  // Normalize ordering to avoid duplicates
+  const [s1, s2] = [student1, student2].sort();
+
+  // Check existing (either order)
+  const { data: existingRows } = await supabaseAdmin
+    .from('anomalies')
+    .select('id, correlation_score')
+    .eq('class_id', classId)
+    .eq('session_date', sessionDate)
+    .or(`and(student_id_1.eq.${s1},student_id_2.eq.${s2}),and(student_id_1.eq.${s2},student_id_2.eq.${s1})`)
+    .limit(1);
+
+  const existing = existingRows?.[0];
+
+  if (existing) {
+    if (correlation > existing.correlation_score) {
+      await supabaseAdmin
+        .from('anomalies')
+        .update({
+          correlation_score: correlation,
+          severity: severity === 'critical' ? 'critical' : 'warning',
+          notes,
+          status: 'pending'
+        })
+        .eq('id', existing.id);
+    }
+    return { anomalyId: existing.id };
+  }
+
+  const { data: inserted } = await supabaseAdmin
+    .from('anomalies')
+    .insert({
+      class_id: classId,
+      session_date: sessionDate,
+      student_id_1: s1,
+      student_id_2: s2,
+      correlation_score: correlation,
+      severity: severity === 'critical' ? 'critical' : 'warning',
+      status: 'pending',
+      notes,
+      created_at: new Date().toISOString()
+    })
+    .select('id')
+    .single();
+
+  return { anomalyId: inserted?.id };
+}
+
+/**
  * Cancel provisional attendance
  */
 exports.cancelProvisional = async (req, res) => {
   try {
-    const { studentId, classId } = req.body;
+    const { studentId, classId, eventId, deviceSignature, deviceSaltVersion = 'v1', deviceIdHash, deviceId: legacyDeviceId } = req.body;
+    const deviceId = deviceIdHash || legacyDeviceId || null;
 
-    if (!studentId || !classId) {
+    if (!studentId || !classId || !eventId || !deviceId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    const { valid: signatureValid } = verifyDeviceSignature({ deviceId, signature: deviceSignature, version: deviceSaltVersion });
+    if (!signatureValid) {
+      return res.status(401).json({ success: false, error: 'INVALID_DEVICE_SIGNATURE' });
+    }
+
     const today = new Date().toISOString().split('T')[0];
+    const scope = `cancel:${studentId}:${classId}:${today}`;
+    const requestHash = stableHash({ studentId, classId, deviceId, eventId });
+    const existingKey = await findKey(eventId, scope);
+
+    if (existingKey) {
+      if (existingKey.request_hash !== requestHash) {
+        return res.status(409).json({ success: false, error: 'IDEMPOTENCY_CONFLICT' });
+      }
+      return res.status(existingKey.status_code || 200).json(existingKey.response || { success: true, message: 'Already cancelled' });
+    }
 
     const { data: updated, error } = await supabaseAdmin
       .from('attendance')
@@ -293,11 +587,15 @@ exports.cancelProvisional = async (req, res) => {
 
     console.log(`🚫 Cancelled provisional attendance for ${studentId} in ${classId}`);
 
-    res.status(200).json({
+    const responseBody = {
       success: true,
       message: 'Provisional attendance cancelled',
       attendance: { id: updated.id, status: updated.status }
-    });
+    };
+
+    await persistKey({ eventId, scope, requestHash, response: responseBody, statusCode: 200 });
+
+    res.status(200).json(responseBody);
 
   } catch (error) {
     console.error('❌ Cancel error:', error);
@@ -322,7 +620,7 @@ exports.getTodayAttendance = async (req, res) => {
 
     if (error) throw error;
 
-    const confirmationWindowSeconds = 180;
+    const confirmationWindowSeconds = CONFIRMATION_WINDOW_SECONDS;
     const now = new Date();
 
     const formatted = (attendance || []).map(record => {
@@ -613,7 +911,8 @@ exports.getTodayAllAttendance = async (req, res) => {
       checkInTime: record.check_in_time,
       confirmedAt: record.confirmed_at,
       rssi: record.rssi,
-      distance: record.distance
+      distance: record.distance,
+      cancellationReason: record.cancellation_reason
     }));
 
     // Summary stats

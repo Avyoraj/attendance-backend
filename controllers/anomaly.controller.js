@@ -82,7 +82,7 @@ exports.updateAnomalyStatus = async (req, res) => {
     if (!status) {
       return res.status(400).json({
         error: 'Missing required field: status',
-        validStatuses: ['reviewed', 'confirmed', 'dismissed']
+        validStatuses: ['pending', 'confirmed_proxy', 'false_positive', 'investigating']
       });
     }
 

@@ -98,15 +98,65 @@ async function analyzeCorrelations(classId = null, sessionDate = null) {
       console.log(`   Flagged: ${summary.flagged} (${summary.flaggedPercentage}%)`);
 
       // Create anomalies for flagged pairs
+      const proxyStudents = new Set();
+      const pendingStudents = new Set();
+
       if (results.flaggedPairs.length > 0) {
         for (const pair of results.flaggedPairs) {
-          await createAnomaly(sessionClassId, sessionDateStr, pair);
+          const status = await createAnomaly(sessionClassId, sessionDateStr, pair);
           totalFlagged++;
+
+          if (status === 'confirmed_proxy') {
+            proxyStudents.add(pair.student1);
+            proxyStudents.add(pair.student2);
+          } else {
+            pendingStudents.add(pair.student1);
+            pendingStudents.add(pair.student2);
+          }
         }
         console.log(`\n🚨 Created ${results.flaggedPairs.length} anomaly flags`);
       } else {
         console.log('\n✅ No suspicious correlations found');
       }
+
+      // 🔄 UPDATE ATTENDANCE STATUS (Closing the Loop)
+      console.log('\n🔄 Updating Attendance Status based on analysis...');
+      const allStudents = sessionStreams.map(s => s.student_id);
+      let updatedCount = 0;
+
+      for (const studentId of allStudents) {
+        let newStatus = 'confirmed'; // Default: Confirmed if no issues
+        let reason = null;
+
+        if (proxyStudents.has(studentId)) {
+          newStatus = 'cancelled';
+          reason = 'Proxy detected by automation';
+        } else if (pendingStudents.has(studentId)) {
+          newStatus = 'provisional'; // Keep provisional until reviewed
+        }
+
+        // Only update if status changes from provisional
+        if (newStatus !== 'provisional') {
+          const { error: updateError } = await supabaseAdmin
+            .from('attendance')
+            .update({ 
+              status: newStatus,
+              confirmed_at: newStatus === 'confirmed' ? new Date().toISOString() : null,
+              cancelled_at: newStatus === 'cancelled' ? new Date().toISOString() : null,
+              cancellation_reason: reason
+            })
+            .eq('student_id', studentId)
+            .eq('class_id', sessionClassId)
+            .eq('session_date', sessionDateStr)
+            .eq('status', 'provisional');
+
+          if (!updateError) {
+            console.log(`   - ${studentId}: ${newStatus.toUpperCase()}`);
+            updatedCount++;
+          }
+        }
+      }
+      console.log(`✅ Updated attendance status for ${updatedCount} students`);
 
       totalAnalyzed += results.totalPairs;
     }
@@ -178,6 +228,18 @@ async function createAnomaly(classId, sessionDate, pair) {
       return;
     }
 
+    // Determine status based on confidence tier
+    let status = 'pending';
+    let autoNotes = '';
+
+    if (pair.correlation >= 0.98) {
+      status = 'confirmed_proxy';
+      autoNotes = '[AUTO-CONFIRMED] Extremely high correlation (>98%) indicates devices moving in perfect sync.';
+    } else if (pair.stationaryCheck?.isSuspiciousStationary) {
+      status = 'pending';
+      autoNotes = '[STATIONARY] Devices appear to be sitting together on a desk (low variance).';
+    }
+
     // Create new
     await supabaseAdmin
       .from('anomalies')
@@ -188,14 +250,18 @@ async function createAnomaly(classId, sessionDate, pair) {
         student_id_2: pair.student2,
         correlation_score: pair.correlation,
         severity: pair.severity === 'critical' ? 'critical' : 'warning',
-        status: 'pending',
-        notes: `${pair.suspiciousDescription} | Data points: ${pair.dataPoints} | Mean RSSI: ${pair.mean1} vs ${pair.mean2}`
+        status: status,
+        notes: `${autoNotes} ${pair.suspiciousDescription} | Data points: ${pair.dataPoints}`
       });
 
-    console.log(`🚨 Created anomaly: ${pair.student1} & ${pair.student2} (ρ=${pair.correlation.toFixed(4)})`);
+    const logIcon = status === 'confirmed_proxy' ? '🤖' : '🚨';
+    console.log(`${logIcon} Created anomaly (${status}): ${pair.student1} & ${pair.student2} (ρ=${pair.correlation.toFixed(4)})`);
+    
+    return status;
 
   } catch (error) {
     console.error(`❌ Error creating anomaly:`, error.message);
+    return 'error';
   }
 }
 

@@ -1,11 +1,11 @@
 /**
- * 📡 RSSI Controller
+ * 📡 RSSI Controller (Supabase Version)
  * 
  * Business logic for RSSI data streaming and correlation analysis
  */
 
-const RSSIStream = require('../models/RSSIStream');
-const { analyzeCorrelations } = require('../scripts/analyze-correlations');
+const { supabaseAdmin } = require('../utils/supabase');
+const { analyzeCorrelations } = require('../scripts/analyze-correlations-supabase');
 
 /**
  * Upload RSSI stream data
@@ -27,21 +27,18 @@ exports.uploadStream = async (req, res) => {
     }
 
     // Calculate clock offset for time sync
-    // offset > 0 means device clock is behind server
-    // offset < 0 means device clock is ahead of server
     let clockOffsetMs = 0;
     if (deviceTimestamp) {
       const deviceTime = new Date(deviceTimestamp).getTime();
       const serverTime = Date.now();
       clockOffsetMs = serverTime - deviceTime;
       
-      // Log significant clock drift (> 5 seconds)
       if (Math.abs(clockOffsetMs) > 5000) {
         console.log(`⏰ Clock drift detected for ${studentId}: ${(clockOffsetMs / 1000).toFixed(1)}s`);
       }
     }
 
-    // Correct timestamps in RSSI data if there's clock drift
+    // Correct timestamps in RSSI data
     const correctedRssiData = rssiData.map(reading => {
       if (reading.timestamp && clockOffsetMs !== 0) {
         const originalTime = new Date(reading.timestamp).getTime();
@@ -49,60 +46,83 @@ exports.uploadStream = async (req, res) => {
         return {
           ...reading,
           timestamp: correctedTime.toISOString(),
-          originalTimestamp: reading.timestamp, // Keep original for debugging
-          clockOffsetMs: clockOffsetMs // Store offset for analysis
+          originalTimestamp: reading.timestamp,
+          clockOffsetMs: clockOffsetMs
         };
       }
       return reading;
     });
 
-    // Use provided sessionDate if present, else default to today
+    // Determine session date
     let sessionDate;
     if (sessionDateInput) {
       const d = new Date(sessionDateInput);
-      sessionDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      sessionDate = d.toISOString().split('T')[0];
     } else {
-      const today = new Date();
-      sessionDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      sessionDate = new Date().toISOString().split('T')[0];
     }
 
-    // Find or create RSSI stream
-    let stream = await RSSIStream.findOne({
-      studentId,
-      classId,
-      sessionDate
-    });
+    // Find existing stream
+    const { data: existingStream } = await supabaseAdmin
+      .from('rssi_streams')
+      .select('*')
+      .eq('student_id', studentId)
+      .eq('class_id', classId)
+      .eq('session_date', sessionDate)
+      .single();
 
-    if (stream) {
-      // Append new data (with corrected timestamps)
-      stream.rssiData.push(...correctedRssiData);
-      stream.completedAt = new Date();
-      stream.totalReadings = stream.rssiData.length;
-      // Track clock offset for this device
-      if (clockOffsetMs !== 0) {
-        stream.lastClockOffsetMs = clockOffsetMs;
-      }
+    let streamId;
+    let totalReadings;
+
+    if (existingStream) {
+      // Append new data
+      // Note: Supabase JSONB append is tricky, usually we fetch, merge, update
+      // Or use a stored procedure. For simplicity here: fetch -> merge -> update
+      const updatedData = [...(existingStream.rssi_data || []), ...correctedRssiData];
+      totalReadings = updatedData.length;
+
+      const { data: updated, error } = await supabaseAdmin
+        .from('rssi_streams')
+        .update({
+          rssi_data: updatedData,
+          sample_count: totalReadings,
+          completed_at: new Date().toISOString(),
+          last_clock_offset_ms: clockOffsetMs !== 0 ? clockOffsetMs : existingStream.last_clock_offset_ms
+        })
+        .eq('id', existingStream.id)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      streamId = updated.id;
     } else {
       // Create new stream
-      stream = new RSSIStream({
-        studentId,
-        classId,
-        sessionDate,
-        rssiData: correctedRssiData,
-        totalReadings: correctedRssiData.length,
-        lastClockOffsetMs: clockOffsetMs !== 0 ? clockOffsetMs : undefined
-      });
+      totalReadings = correctedRssiData.length;
+      const { data: newStream, error } = await supabaseAdmin
+        .from('rssi_streams')
+        .insert({
+          student_id: studentId,
+          class_id: classId,
+          session_date: sessionDate,
+          rssi_data: correctedRssiData,
+          sample_count: totalReadings,
+          started_at: new Date().toISOString(),
+          last_clock_offset_ms: clockOffsetMs !== 0 ? clockOffsetMs : null
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      streamId = newStream.id;
     }
 
-    await stream.save();
-
-    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${stream.totalReadings} readings)${clockOffsetMs !== 0 ? ` [clock offset: ${(clockOffsetMs/1000).toFixed(1)}s]` : ''}`);
+    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${totalReadings} readings)${clockOffsetMs !== 0 ? ` [clock offset: ${(clockOffsetMs/1000).toFixed(1)}s]` : ''}`);
 
     res.status(200).json({
       success: true,
       message: 'RSSI data recorded',
-      totalReadings: stream.totalReadings,
-      streamId: stream._id,
+      totalReadings: totalReadings,
+      streamId: streamId,
       clockOffsetMs: clockOffsetMs !== 0 ? clockOffsetMs : undefined
     });
 
@@ -123,21 +143,24 @@ exports.getStreams = async (req, res) => {
   try {
     const { classId, date, studentId, limit = 100 } = req.query;
 
-    const query = {};
-    
-    if (classId) query.classId = classId;
-    if (studentId) query.studentId = studentId;
+    let query = supabaseAdmin
+      .from('rssi_streams')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(parseInt(limit));
+
+    if (classId) query = query.eq('class_id', classId);
+    if (studentId) query = query.eq('student_id', studentId);
     
     if (date) {
-      const queryDate = new Date(date);
-      const sessionDate = new Date(queryDate.getFullYear(), queryDate.getMonth(), queryDate.getDate());
-      query.sessionDate = sessionDate;
+      const d = new Date(date);
+      const sessionDate = d.toISOString().split('T')[0];
+      query = query.eq('session_date', sessionDate);
     }
 
-    const streams = await RSSIStream
-      .find(query)
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit));
+    const { data: streams, error } = await query;
+
+    if (error) throw error;
 
     res.status(200).json({
       success: true,
@@ -172,9 +195,9 @@ exports.analyzeCorrelations = async (req, res) => {
     res.status(200).json({
       message: 'Correlation analysis completed',
       results: {
-        sessionsAnalyzed: results.sessions,
-        pairsAnalyzed: results.analyzed,
-        anomaliesDetected: results.flagged
+        sessionsAnalyzed: results?.sessions || 0,
+        pairsAnalyzed: results?.analyzed || 0,
+        anomaliesDetected: results?.flagged || 0
       }
     });
 

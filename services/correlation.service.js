@@ -376,6 +376,16 @@ class CorrelationService {
   isSuspicious(correlation, stationaryCheck = null) {
     // High correlation = moving together (lowered threshold from 0.9 to 0.85)
     if (Math.abs(correlation) >= 0.85) {
+      // EXCEPTION: If mean difference is huge, they are likely far apart (e.g. two stationary students at opposite ends)
+      // Two flat lines (stationary) will have correlation 1.0, but if they are 20dBm apart, they are not the same person.
+      if (stationaryCheck && stationaryCheck.meanDifference > 15) {
+        return {
+          suspicious: false,
+          reason: 'high_correlation_but_distant',
+          description: `High correlation (ρ = ${correlation.toFixed(4)}) but large signal difference (${stationaryCheck.meanDifference.toFixed(2)} dBm) - likely distinct locations`
+        };
+      }
+
       return {
         suspicious: true,
         reason: 'high_correlation',
