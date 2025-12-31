@@ -425,26 +425,6 @@ app.post('/api/attendance/manual', require('./controllers/attendance.controller'
 app.get('/api/attendance/history', require('./controllers/attendance.controller').getHistory);
 
 // ==========================================
-// 🧭 ERROR SHAPING
-// ==========================================
-
-// Not-found handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found', requestId: req.id });
-});
-
-// Central error handler (sanitized)
-app.use((err, req, res, _next) => {
-  console.error(`${req.id} unhandled error`, err);
-  const status = err.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
-  res.status(status).json({
-    error: status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR',
-    message: err.message || 'An error occurred',
-    requestId: req.id,
-  });
-});
-
-// ==========================================
 // 📈 METRICS EXPOSURE (basic, unauthenticated)
 // ==========================================
 app.get('/metrics/basic', (_req, res) => {
@@ -1071,6 +1051,26 @@ app.get('/', (req, res) => {
 });
 
 // ==========================================
+// 🧭 ERROR SHAPING
+// ==========================================
+
+// Not-found handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found', requestId: req.id });
+});
+
+// Central error handler (sanitized)
+app.use((err, req, res, _next) => {
+  console.error(`${req.id} unhandled error`, err);
+  const status = err.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
+  res.status(status).json({
+    error: status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR',
+    message: err.message || 'An error occurred',
+    requestId: req.id,
+  });
+});
+
+// ==========================================
 // 🚀 SERVER STARTUP
 // ==========================================
 
@@ -1090,3 +1090,5 @@ if (process.env.VERCEL) {
 
   module.exports = app;
 }
+
+
