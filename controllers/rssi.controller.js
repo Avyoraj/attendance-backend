@@ -137,7 +137,8 @@ exports.uploadStream = async (req, res) => {
 };
 
 /**
- * Get RSSI streams
+ * Get RSSI streams with attendance status enrichment
+ * This helps the dashboard show which streams are from confirmed/legitimate students
  */
 exports.getStreams = async (req, res) => {
   try {
@@ -152,20 +153,54 @@ exports.getStreams = async (req, res) => {
     if (classId) query = query.eq('class_id', classId);
     if (studentId) query = query.eq('student_id', studentId);
     
+    // Determine session date for the query
+    let sessionDate;
     if (date) {
       const d = new Date(date);
-      const sessionDate = d.toISOString().split('T')[0];
+      sessionDate = d.toISOString().split('T')[0];
       query = query.eq('session_date', sessionDate);
+    } else {
+      sessionDate = new Date().toISOString().split('T')[0];
     }
 
     const { data: streams, error } = await query;
 
     if (error) throw error;
 
+    // Enrich streams with attendance status (confirmed = legitimate)
+    const studentIds = [...new Set(streams.map(s => s.student_id))];
+    
+    let attendanceMap = {};
+    if (studentIds.length > 0) {
+      const { data: attendanceRecords } = await supabaseAdmin
+        .from('attendance')
+        .select('student_id, status, confirmed_at')
+        .in('student_id', studentIds)
+        .eq('session_date', sessionDate);
+      
+      if (attendanceRecords) {
+        attendanceRecords.forEach(a => {
+          attendanceMap[a.student_id] = {
+            status: a.status,
+            confirmed_at: a.confirmed_at,
+            isConfirmed: a.status === 'confirmed'
+          };
+        });
+      }
+    }
+
+    // Add attendance info to each stream
+    const enrichedStreams = streams.map(stream => ({
+      ...stream,
+      attendance_status: attendanceMap[stream.student_id]?.status || 'unknown',
+      is_confirmed: attendanceMap[stream.student_id]?.isConfirmed || false,
+      confirmed_at: attendanceMap[stream.student_id]?.confirmed_at || null
+    }));
+
     res.status(200).json({
       success: true,
-      count: streams.length,
-      streams
+      count: enrichedStreams.length,
+      streams: enrichedStreams
     });
 
   } catch (error) {

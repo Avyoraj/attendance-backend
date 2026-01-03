@@ -99,9 +99,10 @@ app.use(express.static('public'));
 app.use('/public', express.static('public'));
 
 // Rate limiting (general + stricter for check-in/confirm)
+// Increased limits to handle React dashboard polling (multiple components poll every 10s)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 1000,  // Increased from 200 to handle dashboard polling
   standardHeaders: true,
   legacyHeaders: false,
   message: 'Too many requests, please try again later.'
@@ -109,7 +110,7 @@ const apiLimiter = rateLimit({
 
 const checkLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 30,  // Slightly increased for faster testing
   standardHeaders: true,
   legacyHeaders: false,
   message: 'Too many attendance requests, slow down.'
@@ -558,19 +559,23 @@ app.put('/api/anomalies/:id/review', async (req, res) => {
     
     if (error) throw error;
     
-    // If confirmed proxy, mark both students' attendance as flagged
+    // If confirmed proxy, mark both students' attendance as cancelled by teacher
     if (action === 'confirm_proxy' && anomaly) {
+      const cancellationReason = 'Proxy attendance - manually confirmed by teacher';
+      
       await supabaseAdmin
         .from('attendance')
-        .update({ status: 'cancelled', cancellation_reason: 'Proxy attendance detected' })
+        .update({ status: 'cancelled', cancellation_reason: cancellationReason })
         .eq('student_id', anomaly.student_id_1)
         .eq('session_date', anomaly.session_date);
       
       await supabaseAdmin
         .from('attendance')
-        .update({ status: 'cancelled', cancellation_reason: 'Proxy attendance detected' })
+        .update({ status: 'cancelled', cancellation_reason: cancellationReason })
         .eq('student_id', anomaly.student_id_2)
         .eq('session_date', anomaly.session_date);
+      
+      console.log(`🚫 Teacher confirmed proxy: ${anomaly.student_id_1} & ${anomaly.student_id_2} attendance cancelled`);
     }
     
     res.json({ success: true, anomaly });

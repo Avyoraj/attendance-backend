@@ -75,18 +75,45 @@ class CorrelationService {
    * Detects when correlation is low BUT both devices have:
    * - Low variance (stationary/stable)
    * - Similar average RSSI (same location)
+   * 
+   * IMPORTANT: For two phones sitting together on a desk:
+   * - RSSI values will be very similar (small variance)
+   * - Signal strength will be similar (small mean difference)
+   * - Correlation might be LOW because flat signals don't correlate well
+   * - We need to catch this case with generous thresholds!
    */
   checkStationaryProxy(data1, data2, mean1, mean2, stdDev1, stdDev2) {
-    const STATIONARY_THRESHOLD = 5;    // StdDev below this = stationary (increased from 3)
-    const MEAN_DIFF_THRESHOLD = 8;     // If means within 8 dBm = same location (increased from 5)
+    // INCREASED THRESHOLDS for better detection:
+    const STATIONARY_THRESHOLD = 8;    // StdDev below this = stationary (was 5, now 8)
+    const MEAN_DIFF_THRESHOLD = 12;    // If means within 12 dBm = same location (was 8, now 12)
     
     const isStationary1 = stdDev1 < STATIONARY_THRESHOLD;
     const isStationary2 = stdDev2 < STATIONARY_THRESHOLD;
     const meanDifference = Math.abs(mean1 - mean2);
     const isSameLocation = meanDifference <= MEAN_DIFF_THRESHOLD;
     
+    // Check if both are stationary
     const isStationary = isStationary1 && isStationary2;
+    
+    // ENHANCED: Also flag if ONE device is very stationary AND they are at same location
+    // This catches the case where one person holds their phone still with another person's phone nearby
+    const isOneVeryStationary = (stdDev1 < 3 || stdDev2 < 3);
+    const isBothRelativelyStationary = (stdDev1 < STATIONARY_THRESHOLD && stdDev2 < STATIONARY_THRESHOLD);
+    
+    // Primary check: both stationary at same location
     const isSuspiciousStationary = isStationary && isSameLocation;
+    
+    // Secondary check: one very stationary + same location + other relatively stable
+    const isEnhancedSuspicious = isOneVeryStationary && isBothRelativelyStationary && isSameLocation;
+    
+    const finalSuspicious = isSuspiciousStationary || isEnhancedSuspicious;
+    
+    if (finalSuspicious) {
+      console.log(`🪑 STATIONARY PROXY DETECTED:`);
+      console.log(`   - Device 1 stdDev: ${stdDev1.toFixed(2)} (stationary: ${isStationary1})`);
+      console.log(`   - Device 2 stdDev: ${stdDev2.toFixed(2)} (stationary: ${isStationary2})`);
+      console.log(`   - Mean difference: ${meanDifference.toFixed(2)} dBm (same location: ${isSameLocation})`);
+    }
     
     return {
       isStationary,
@@ -96,8 +123,8 @@ class CorrelationService {
       stdDev2,
       meanDifference,
       isSameLocation,
-      isSuspiciousStationary,
-      reason: isSuspiciousStationary 
+      isSuspiciousStationary: finalSuspicious,
+      reason: finalSuspicious 
         ? `Both devices stationary at same location (stdDev: ${stdDev1.toFixed(2)}, ${stdDev2.toFixed(2)}, mean diff: ${meanDifference.toFixed(2)} dBm)` 
         : null
     };
@@ -369,15 +396,19 @@ class CorrelationService {
    * Check if correlation indicates proxy behavior
    * Now includes stationary detection for the "desk scenario"
    * 
+   * Detection strategies:
+   * 1. HIGH CORRELATION (≥0.8): Devices moving together (walking together)
+   * 2. STATIONARY PROXY: Both stable + same location (phones on desk together)
+   * 
    * @param {Number} correlation - Pearson correlation coefficient
    * @param {Object} stationaryCheck - Result from checkStationaryProxy
    * @returns {Object} { suspicious, reason }
    */
   isSuspicious(correlation, stationaryCheck = null) {
-    // High correlation = moving together (lowered threshold from 0.9 to 0.85)
-    if (Math.abs(correlation) >= 0.85) {
-      // EXCEPTION: If mean difference is huge, they are likely far apart (e.g. two stationary students at opposite ends)
-      // Two flat lines (stationary) will have correlation 1.0, but if they are 20dBm apart, they are not the same person.
+    // HIGH CORRELATION = moving together (lowered from 0.85 to 0.8 for better detection)
+    if (Math.abs(correlation) >= 0.8) {
+      // EXCEPTION: If mean difference is huge, they are likely far apart
+      // Two flat lines will have correlation ~1.0, but if 20dBm apart, not same person
       if (stationaryCheck && stationaryCheck.meanDifference > 15) {
         return {
           suspicious: false,
@@ -393,12 +424,23 @@ class CorrelationService {
       };
     }
     
-    // Stationary proxy detection (desk scenario)
+    // STATIONARY PROXY detection (desk scenario) - PRIORITY CHECK
+    // This catches cases where correlation is LOW but both phones are sitting together
     if (stationaryCheck && stationaryCheck.isSuspiciousStationary) {
       return {
         suspicious: true,
         reason: 'stationary_proxy',
         description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm, stdDev: ${stationaryCheck.stdDev1?.toFixed(2) || 'N/A'}, ${stationaryCheck.stdDev2?.toFixed(2) || 'N/A'})`
+      };
+    }
+    
+    // MODERATE CORRELATION (0.6-0.8) + SAME LOCATION = also suspicious
+    // This catches borderline cases where phones are together but have slight movement differences
+    if (Math.abs(correlation) >= 0.6 && stationaryCheck && stationaryCheck.isSameLocation) {
+      return {
+        suspicious: true,
+        reason: 'moderate_correlation_same_location',
+        description: `Moderate correlation (ρ = ${correlation.toFixed(4)}) at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm)`
       };
     }
     

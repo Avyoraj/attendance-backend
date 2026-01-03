@@ -276,11 +276,13 @@ exports.confirmAttendance = async (req, res) => {
       });
     }
 
-    // TTL enforcement: if provisional is older than window, cancel and stop
+    // TTL enforcement: if provisional is older than window + grace period, cancel and stop
+    // Grace period (30s) accounts for: network delays, final proximity gate, processing time
+    const TTL_GRACE_PERIOD_SECONDS = 30;
     const checkInTime = attendance.check_in_time ? new Date(attendance.check_in_time) : null;
     if (checkInTime) {
       const elapsed = (Date.now() - checkInTime.getTime()) / 1000;
-      if (elapsed > confirmationWindowSeconds) {
+      if (elapsed > confirmationWindowSeconds + TTL_GRACE_PERIOD_SECONDS) {
         // Auto-cancel stale provisional
         await supabaseAdmin
           .from('attendance')
@@ -329,6 +331,18 @@ exports.confirmAttendance = async (req, res) => {
       const existingAnomaly = pendingAnomalies?.[0];
       if (existingAnomaly) {
         const otherStudent = existingAnomaly.student_id_1 === studentId ? existingAnomaly.student_id_2 : existingAnomaly.student_id_1;
+        
+        // Update attendance status to 'flagged' so it doesn't restart the timer
+        await supabaseAdmin
+          .from('attendance')
+          .update({ 
+            status: 'flagged',
+            cancellation_reason: `Proxy pattern detected with ${otherStudent}. Correlation: ${existingAnomaly.correlation_score?.toFixed(3) || 'N/A'}`
+          })
+          .eq('id', attendance.id);
+        
+        console.log(`🚨 PROXY DETECTED: ${studentId} flagged with ${otherStudent} (ρ=${existingAnomaly.correlation_score?.toFixed(3)})`);
+        
         return res.status(403).json({
           success: false,
           error: 'PROXY_DETECTED',
@@ -341,6 +355,17 @@ exports.confirmAttendance = async (req, res) => {
 
       const correlationResult = await runCorrelationCheckForStudent({ studentId, classId, sessionDate: today });
       if (correlationResult?.flagged) {
+        // Update attendance status to 'flagged' so it doesn't restart the timer
+        await supabaseAdmin
+          .from('attendance')
+          .update({ 
+            status: 'flagged',
+            cancellation_reason: `Proxy pattern detected with ${correlationResult.otherStudent}. Correlation: ${correlationResult.correlationScore?.toFixed(3) || 'N/A'}`
+          })
+          .eq('id', attendance.id);
+        
+        console.log(`🚨 PROXY DETECTED: ${studentId} flagged with ${correlationResult.otherStudent} (ρ=${correlationResult.correlationScore?.toFixed(3)})`);
+        
         return res.status(403).json({
           success: false,
           error: 'PROXY_DETECTED',
