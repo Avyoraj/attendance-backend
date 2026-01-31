@@ -12,7 +12,7 @@ const { stableHash, findKey, persistKey } = require('../utils/idempotency');
 // ⚙️ CONFIGURATION SWITCH
 // ------------------------------------------------------------------
 // Set to TRUE for Demo (3 mins), FALSE for Production (30 mins)
-const IS_DEMO_MODE = true; 
+const IS_DEMO_MODE = true;
 
 const CONFIRMATION_WINDOW_SECONDS = IS_DEMO_MODE ? 180 : 1800; // 3 mins vs 30 mins
 // ------------------------------------------------------------------
@@ -26,7 +26,7 @@ exports.checkIn = async (req, res) => {
     const deviceId = deviceIdHash || legacyDeviceId || null;
 
     if (!studentId || !classId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields',
         required: ['studentId', 'classId']
       });
@@ -131,7 +131,7 @@ exports.checkIn = async (req, res) => {
       const confirmationWindowSeconds = CONFIRMATION_WINDOW_SECONDS;
       const now = new Date();
       let remainingSeconds = 0;
-      
+
       if (existing.status === 'provisional' && existing.check_in_time) {
         const elapsed = Math.floor((now.getTime() - new Date(existing.check_in_time).getTime()) / 1000);
         remainingSeconds = Math.max(confirmationWindowSeconds - elapsed, 0);
@@ -208,7 +208,11 @@ exports.checkIn = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Check-in error:', error);
-    res.status(500).json({ success: false, error: 'Failed to record attendance' });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to record attendance',
+      details: error.message || error
+    });
   }
 };
 
@@ -249,7 +253,7 @@ exports.confirmAttendance = async (req, res) => {
       }
       return res.status(existingKey.status_code || 200).json(existingKey.response || { success: true, message: 'Already confirmed' });
     }
-    
+
     // Use the configured window (Demo vs Prod)
     const confirmationWindowSeconds = CONFIRMATION_WINDOW_SECONDS;
 
@@ -280,6 +284,7 @@ exports.confirmAttendance = async (req, res) => {
     // Grace period (30s) accounts for: network delays, final proximity gate, processing time
     const TTL_GRACE_PERIOD_SECONDS = 30;
     const checkInTime = attendance.check_in_time ? new Date(attendance.check_in_time) : null;
+
     if (checkInTime) {
       const elapsed = (Date.now() - checkInTime.getTime()) / 1000;
       if (elapsed > confirmationWindowSeconds + TTL_GRACE_PERIOD_SECONDS) {
@@ -331,18 +336,35 @@ exports.confirmAttendance = async (req, res) => {
       const existingAnomaly = pendingAnomalies?.[0];
       if (existingAnomaly) {
         const otherStudent = existingAnomaly.student_id_1 === studentId ? existingAnomaly.student_id_2 : existingAnomaly.student_id_1;
-        
+
         // Update attendance status to 'flagged' so it doesn't restart the timer
         await supabaseAdmin
           .from('attendance')
-          .update({ 
+          .update({
             status: 'flagged',
             cancellation_reason: `Proxy pattern detected with ${otherStudent}. Correlation: ${existingAnomaly.correlation_score?.toFixed(3) || 'N/A'}`
           })
           .eq('id', attendance.id);
-        
+
         console.log(`🚨 PROXY DETECTED: ${studentId} flagged with ${otherStudent} (ρ=${existingAnomaly.correlation_score?.toFixed(3)})`);
-        
+
+        // ⚔️ FIX: Retroactively flag the PEER (who might be confirmed already)
+        try {
+          await supabaseAdmin
+            .from('attendance')
+            .update({
+              status: 'flagged',
+              cancellation_reason: `Proxy pattern detected with ${studentId} (retroactive). Correlation: ${existingAnomaly.correlation_score?.toFixed(3) || 'N/A'}`
+            })
+            .eq('student_id', otherStudent)
+            .eq('class_id', classId)
+            .eq('session_date', today)
+            .neq('status', 'cancelled');
+          console.log(`⚔️ Retroactively flagged peer: ${otherStudent}`);
+        } catch (err) {
+          console.error('Failed to retroactive flag peer:', err);
+        }
+
         return res.status(403).json({
           success: false,
           error: 'PROXY_DETECTED',
@@ -358,14 +380,31 @@ exports.confirmAttendance = async (req, res) => {
         // Update attendance status to 'flagged' so it doesn't restart the timer
         await supabaseAdmin
           .from('attendance')
-          .update({ 
+          .update({
             status: 'flagged',
             cancellation_reason: `Proxy pattern detected with ${correlationResult.otherStudent}. Correlation: ${correlationResult.correlationScore?.toFixed(3) || 'N/A'}`
           })
           .eq('id', attendance.id);
-        
+
         console.log(`🚨 PROXY DETECTED: ${studentId} flagged with ${correlationResult.otherStudent} (ρ=${correlationResult.correlationScore?.toFixed(3)})`);
-        
+
+        // ⚔️ FIX: Retroactively flag the PEER (who might be confirmed already)
+        try {
+          await supabaseAdmin
+            .from('attendance')
+            .update({
+              status: 'flagged',
+              cancellation_reason: `Proxy pattern detected with ${studentId} (retroactive). Correlation: ${correlationResult.correlationScore?.toFixed(3) || 'N/A'}`
+            })
+            .eq('student_id', correlationResult.otherStudent)
+            .eq('class_id', classId)
+            .eq('session_date', today)
+            .neq('status', 'cancelled');
+          console.log(`⚔️ Retroactively flagged peer: ${correlationResult.otherStudent}`);
+        } catch (err) {
+          console.error('Failed to retroactive flag peer:', err);
+        }
+
         return res.status(403).json({
           success: false,
           error: 'PROXY_DETECTED',
@@ -375,6 +414,20 @@ exports.confirmAttendance = async (req, res) => {
           otherStudent: correlationResult.otherStudent
         });
       }
+    }
+
+    // ------------------------------------------------------------------
+    // ⚔️ ASYMMETRIC FIX: If we just flagged a proxy, we MUST invalidate the peer!
+    // If Student A is confirmed, and Student B triggers a proxy flag with A,
+    // we must retroactively flag Student A as well.
+    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // ⚔️ ASYMMETRIC FIX: If we just flagged a proxy, we MUST invalidate the peer!
+    // If Student A is confirmed, and Student B triggers a proxy flag with A,
+    // we must retroactively flag Student A as well.
+    // ------------------------------------------------------------------
+    if (teacherOverride === false) {
+      // This block is implicitly handled above by the returns.
     }
 
     // Update to confirmed
@@ -913,13 +966,13 @@ exports.getTodayAllAttendance = async (req, res) => {
     // Get student names for display
     const studentIds = [...new Set((attendance || []).map(a => a.student_id))];
     let studentMap = {};
-    
+
     if (studentIds.length > 0) {
       const { data: students } = await supabaseAdmin
         .from('students')
         .select('student_id, name')
         .in('student_id', studentIds);
-      
+
       studentMap = (students || []).reduce((acc, s) => {
         acc[s.student_id] = s.name;
         return acc;

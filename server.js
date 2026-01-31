@@ -24,28 +24,11 @@ const attendanceRoutes = require('./routes/attendance.routes');
 const anomalyRoutes = require('./routes/anomaly.routes');
 const rssiRoutes = require('./routes/rssi.routes');
 
-// Simple in-memory metrics (reset on restart)
-const metrics = {
-  checkIn: { success: 0, fail: 0, durationMs: [] },
-  confirm: { success: 0, fail: 0, durationMs: [] },
-  cancel: { success: 0, fail: 0, durationMs: [] },
-};
+// Shared metrics
+const { metrics, withMetrics } = require('./utils/metrics');
 
-// Simple request body validator for required fields
-const requireFields = (fields = []) => (req, res, next) => {
-  const missing = fields.filter((f) =>
-    req.body?.[f] === undefined || req.body?.[f] === null || req.body?.[f] === ''
-  );
-
-  if (missing.length) {
-    return res.status(400).json({
-      error: 'BAD_REQUEST',
-      message: `Missing required field(s): ${missing.join(', ')}`,
-      requestId: req.id,
-    });
-  }
-  next();
-};
+// Shared validators
+const { requireFields } = require('./utils/validators');
 
 const app = express();
 
@@ -60,7 +43,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Credentials', 'true');
-  
+
   // Handle preflight OPTIONS request
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -100,20 +83,13 @@ app.use('/public', express.static('public'));
 
 // Rate limiting (general + stricter for check-in/confirm)
 // Increased limits to handle React dashboard polling (multiple components poll every 10s)
+// Rate limiters
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 1000,  // Increased from 200 to handle dashboard polling
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: 'Too many requests, please try again later.'
-});
-
-const checkLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,  // Slightly increased for faster testing
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: 'Too many attendance requests, slow down.'
 });
 
 // ==========================================
@@ -205,7 +181,7 @@ app.get('/api/students', apiLimiter, async (req, res) => {
       .from('students')
       .select('*')
       .order('name');
-    
+
     if (error) throw error;
     res.json(students || []);
   } catch (error) {
@@ -281,7 +257,7 @@ app.get('/api/classes', apiLimiter, async (req, res) => {
       .from('classes')
       .select('*')
       .order('name');
-    
+
     if (error) throw error;
     res.json(classes || []);
   } catch (error) {
@@ -364,7 +340,7 @@ app.get('/api/rooms', apiLimiter, async (req, res) => {
       .from('rooms')
       .select('*')
       .order('name');
-    
+
     if (error) throw error;
     res.json(rooms || []);
   } catch (error) {
@@ -394,27 +370,8 @@ app.get('/api/sessions/:sessionId/attendance', apiLimiter, async (req, res) => {
 });
 
 // Check-in routes (Flutter app)
-const attendanceController = require('./controllers/attendance.controller');
-app.post(
-  '/api/check-in',
-  checkLimiter,
-  requireFields(['studentId', 'classId', 'deviceId', 'eventId', 'deviceSignature']),
-  withMetrics('checkIn', attendanceController.checkIn)
-);
-app.post(
-  '/api/attendance/confirm',
-  checkLimiter,
-  requireFields(['studentId', 'classId', 'deviceId', 'eventId', 'deviceSignature']),
-  withMetrics('confirm', attendanceController.confirmAttendance)
-);
-app.post(
-  '/api/attendance/cancel-provisional',
-  checkLimiter,
-  requireFields(['studentId', 'classId', 'deviceId', 'eventId', 'deviceSignature']),
-  withMetrics('cancel', attendanceController.cancelProvisional)
-);
-app.post('/api/check-in/stream', checkLimiter, attendanceController.uploadRssiStream);
-app.post('/api/attendance/rssi-stream', checkLimiter, attendanceController.uploadRssiStream);
+// MOVED TO routes/attendance.routes.js and routes/rssi.routes.js
+// const attendanceController = require('./controllers/attendance.controller');
 
 // Attendance query routes
 app.use('/api/attendance', apiLimiter, attendanceRoutes);
@@ -443,35 +400,7 @@ app.get('/metrics/basic', (_req, res) => {
   });
 });
 
-// Wrapper to capture duration/success per route
-function withMetrics(name, handler) {
-  return async (req, res, next) => {
-    const start = Date.now();
-    const bucket = metrics[name] || { success: 0, fail: 0, durationMs: [] };
-
-    // Wrap res.end to inspect status
-    const originalEnd = res.end;
-    res.end = function (...args) {
-      const duration = Date.now() - start;
-      bucket.durationMs.push(duration);
-      if (res.statusCode >= 200 && res.statusCode < 400) {
-        bucket.success += 1;
-      } else {
-        bucket.fail += 1;
-      }
-      metrics[name] = bucket;
-      return originalEnd.apply(this, args);
-    };
-
-    try {
-      await handler(req, res, next);
-    } catch (err) {
-      bucket.fail += 1;
-      metrics[name] = bucket;
-      next(err);
-    }
-  };
-}
+// Helper 'withMetrics' is now imported from utils/metrics.js
 
 // ==========================================
 // 🔍 ANOMALY ENDPOINTS (Proxy Detection)
@@ -482,20 +411,20 @@ app.get('/api/anomalies/check/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
     const today = new Date().toISOString().split('T')[0];
-    
+
     const { data: anomalies, error } = await supabaseAdmin
       .from('anomalies')
       .select('*')
       .eq('status', 'pending')
       .eq('session_date', today)
       .or(`student_id_1.eq.${studentId},student_id_2.eq.${studentId}`);
-    
+
     if (error) throw error;
-    
+
     if (anomalies && anomalies.length > 0) {
       const anomaly = anomalies[0];
       const otherStudent = anomaly.student_id_1 === studentId ? anomaly.student_id_2 : anomaly.student_id_1;
-      
+
       return res.json({
         flagged: true,
         message: `Suspicious pattern detected with ${otherStudent}`,
@@ -505,7 +434,7 @@ app.get('/api/anomalies/check/:studentId', async (req, res) => {
         severity: anomaly.severity
       });
     }
-    
+
     res.json({ flagged: false, message: 'No anomalies detected' });
   } catch (error) {
     console.error('❌ Check anomaly error:', error);
@@ -517,18 +446,18 @@ app.get('/api/anomalies/check/:studentId', async (req, res) => {
 app.get('/api/anomalies', async (req, res) => {
   try {
     const { status, classId, limit = 50 } = req.query;
-    
+
     let query = supabaseAdmin.from('anomalies').select('*');
-    
+
     if (status) query = query.eq('status', status);
     if (classId) query = query.eq('class_id', classId);
-    
+
     const { data: anomalies, error } = await query
       .order('created_at', { ascending: false })
       .limit(parseInt(limit));
-    
+
     if (error) throw error;
-    
+
     res.json({ anomalies: anomalies || [] });
   } catch (error) {
     console.error('❌ Get anomalies error:', error);
@@ -541,11 +470,11 @@ app.put('/api/anomalies/:id/review', async (req, res) => {
   try {
     const { id } = req.params;
     const { action, notes } = req.body; // action: 'confirm_proxy' | 'false_positive'
-    
+
     if (!action || !['confirm_proxy', 'false_positive'].includes(action)) {
       return res.status(400).json({ error: 'Invalid action. Use confirm_proxy or false_positive' });
     }
-    
+
     const { data: anomaly, error } = await supabaseAdmin
       .from('anomalies')
       .update({
@@ -556,28 +485,28 @@ app.put('/api/anomalies/:id/review', async (req, res) => {
       .eq('id', id)
       .select()
       .single();
-    
+
     if (error) throw error;
-    
+
     // If confirmed proxy, mark both students' attendance as cancelled by teacher
     if (action === 'confirm_proxy' && anomaly) {
       const cancellationReason = 'Proxy attendance - manually confirmed by teacher';
-      
+
       await supabaseAdmin
         .from('attendance')
         .update({ status: 'cancelled', cancellation_reason: cancellationReason })
         .eq('student_id', anomaly.student_id_1)
         .eq('session_date', anomaly.session_date);
-      
+
       await supabaseAdmin
         .from('attendance')
         .update({ status: 'cancelled', cancellation_reason: cancellationReason })
         .eq('student_id', anomaly.student_id_2)
         .eq('session_date', anomaly.session_date);
-      
+
       console.log(`🚫 Teacher confirmed proxy: ${anomaly.student_id_1} & ${anomaly.student_id_2} attendance cancelled`);
     }
-    
+
     res.json({ success: true, anomaly });
   } catch (error) {
     console.error('❌ Review anomaly error:', error);
@@ -589,16 +518,16 @@ app.put('/api/anomalies/:id/review', async (req, res) => {
 app.get('/api/rssi/streams/today', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    
+
     const { data: streams, error } = await supabaseAdmin
       .from('rssi_streams')
       .select('student_id, class_id, session_date, sample_count, created_at, updated_at')
       .eq('session_date', today)
       .order('updated_at', { ascending: false });
-    
+
     if (error) throw error;
-    
-    res.json({ 
+
+    res.json({
       streams: streams || [],
       date: today,
       count: streams?.length || 0
@@ -613,15 +542,15 @@ app.get('/api/rssi/streams/today', async (req, res) => {
 app.get('/api/rssi-streams/:classId/:date', async (req, res) => {
   try {
     const { classId, date } = req.params;
-    
+
     const { data: streams, error } = await supabaseAdmin
       .from('rssi_streams')
       .select('*')
       .eq('class_id', classId)
       .eq('session_date', date);
-    
+
     if (error) throw error;
-    
+
     res.json({ streams: streams || [] });
   } catch (error) {
     console.error('❌ Get RSSI streams error:', error);
@@ -633,12 +562,12 @@ app.get('/api/rssi-streams/:classId/:date', async (req, res) => {
 app.post('/api/analyze-correlations', async (req, res) => {
   try {
     const { classId, sessionDate } = req.body;
-    
+
     console.log('🔍 Triggering correlation analysis...');
-    
+
     const { analyzeCorrelations } = require('./scripts/analyze-correlations-supabase');
     const results = await analyzeCorrelations(classId || null, sessionDate || null);
-    
+
     res.json({
       success: true,
       message: 'Correlation analysis complete',
@@ -654,10 +583,10 @@ app.post('/api/analyze-correlations', async (req, res) => {
 app.get('/api/analyze-correlations/test', async (req, res) => {
   try {
     console.log('🧪 Running correlation test with simulated data...');
-    
+
     const { runWithTestData } = require('./scripts/analyze-correlations-supabase');
     const results = await runWithTestData();
-    
+
     res.json({
       success: true,
       message: 'Test analysis complete',
@@ -687,8 +616,8 @@ app.post('/api/validate-device', async (req, res) => {
     const { studentId, deviceId } = req.body;
 
     if (!studentId || !deviceId) {
-      return res.status(400).json({ 
-        canLogin: false, 
+      return res.status(400).json({
+        canLogin: false,
         error: 'Missing required fields',
         message: 'Student ID and Device ID are required'
       });
@@ -796,10 +725,10 @@ app.post('/api/students/:studentId/reset-device', async (req, res) => {
     }
 
     console.log(`✅ Device binding reset for student: ${studentId}`);
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `Device binding reset for ${studentId}`,
-      student 
+      student
     });
 
   } catch (error) {
@@ -813,7 +742,7 @@ app.get('/api/students/:studentId/summary', async (req, res) => {
   try {
     const { studentId } = req.params;
     const today = new Date().toISOString().split('T')[0];
-    
+
     // Get today's attendance
     const { data: todayAttendance } = await supabaseAdmin
       .from('attendance')
@@ -824,7 +753,7 @@ app.get('/api/students/:studentId/summary', async (req, res) => {
     // Get last 7 days attendance
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
-    
+
     const { data: weekAttendance } = await supabaseAdmin
       .from('attendance')
       .select('*')
@@ -863,10 +792,10 @@ app.get('/api/students/:studentId/history', async (req, res) => {
   try {
     const { studentId } = req.params;
     const { days = 30 } = req.query;
-    
+
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
-    
+
     const { data: attendance, error } = await supabaseAdmin
       .from('attendance')
       .select('*')
@@ -902,8 +831,8 @@ app.get('/api/students/:studentId/profile', async (req, res) => {
     }
 
     // Check if profile is complete (has name that's not auto-generated)
-    const isProfileComplete = student.name && 
-      !student.name.startsWith('Student ') && 
+    const isProfileComplete = student.name &&
+      !student.name.startsWith('Student ') &&
       student.name !== studentId;
 
     res.json({
@@ -946,12 +875,12 @@ app.put('/api/students/:studentId/profile', async (req, res) => {
     }
 
     // Check if profile was already set (not auto-generated name)
-    const wasAlreadySet = existing.name && 
-      !existing.name.startsWith('Student ') && 
+    const wasAlreadySet = existing.name &&
+      !existing.name.startsWith('Student ') &&
       existing.name !== studentId;
 
     if (wasAlreadySet) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         error: 'Profile already set',
         message: 'Profile can only be set once. Contact your teacher to make changes.'
       });

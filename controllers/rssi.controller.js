@@ -20,7 +20,7 @@ exports.uploadStream = async (req, res) => {
     const { studentId, classId, rssiData, sessionDate: sessionDateInput, deviceTimestamp } = req.body;
 
     if (!studentId || !classId || !rssiData || !Array.isArray(rssiData)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields',
         required: ['studentId', 'classId', 'rssiData (array)']
       });
@@ -32,7 +32,7 @@ exports.uploadStream = async (req, res) => {
       const deviceTime = new Date(deviceTimestamp).getTime();
       const serverTime = Date.now();
       clockOffsetMs = serverTime - deviceTime;
-      
+
       if (Math.abs(clockOffsetMs) > 5000) {
         console.log(`⏰ Clock drift detected for ${studentId}: ${(clockOffsetMs / 1000).toFixed(1)}s`);
       }
@@ -85,14 +85,12 @@ exports.uploadStream = async (req, res) => {
         .from('rssi_streams')
         .update({
           rssi_data: updatedData,
-          sample_count: totalReadings,
-          completed_at: new Date().toISOString(),
-          last_clock_offset_ms: clockOffsetMs !== 0 ? clockOffsetMs : existingStream.last_clock_offset_ms
+          sample_count: totalReadings
         })
         .eq('id', existingStream.id)
         .select()
         .single();
-      
+
       if (error) throw error;
       streamId = updated.id;
     } else {
@@ -105,9 +103,7 @@ exports.uploadStream = async (req, res) => {
           class_id: classId,
           session_date: sessionDate,
           rssi_data: correctedRssiData,
-          sample_count: totalReadings,
-          started_at: new Date().toISOString(),
-          last_clock_offset_ms: clockOffsetMs !== 0 ? clockOffsetMs : null
+          sample_count: totalReadings
         })
         .select()
         .single();
@@ -116,7 +112,31 @@ exports.uploadStream = async (req, res) => {
       streamId = newStream.id;
     }
 
-    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${totalReadings} readings)${clockOffsetMs !== 0 ? ` [clock offset: ${(clockOffsetMs/1000).toFixed(1)}s]` : ''}`);
+    console.log(`📡 RSSI stream updated: ${studentId} in ${classId} (${totalReadings} readings)${clockOffsetMs !== 0 ? ` [clock offset: ${(clockOffsetMs / 1000).toFixed(1)}s]` : ''}`);
+
+    // 🔄 AUTO-TRIGGER CORRELATION ANALYSIS if 2+ students have data
+    // Check if there are multiple streams for this class/session
+    try {
+      const { data: allStreams } = await supabaseAdmin
+        .from('rssi_streams')
+        .select('student_id, sample_count')
+        .eq('class_id', classId)
+        .eq('session_date', sessionDate)
+        .gte('sample_count', 10);  // Only count streams with enough data
+
+      if (allStreams && allStreams.length >= 2) {
+        console.log(`🔍 AUTO: ${allStreams.length} students have RSSI data - triggering correlation analysis...`);
+        // Run analysis in background (don't await - let response return quickly)
+        const { analyzeCorrelations } = require('../scripts/analyze-correlations-supabase');
+        analyzeCorrelations(classId, sessionDate).then(results => {
+          console.log(`✅ AUTO: Correlation analysis complete - ${results?.flagged || 0} anomalies flagged`);
+        }).catch(err => {
+          console.error('❌ AUTO: Correlation analysis failed:', err.message);
+        });
+      }
+    } catch (autoErr) {
+      console.error('⚠️ Auto-analysis check failed:', autoErr.message);
+    }
 
     res.status(200).json({
       success: true,
@@ -128,10 +148,10 @@ exports.uploadStream = async (req, res) => {
 
   } catch (error) {
     console.error('❌ RSSI stream error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to record RSSI data',
-      details: error.message 
+      details: error.message
     });
   }
 };
@@ -152,7 +172,7 @@ exports.getStreams = async (req, res) => {
 
     if (classId) query = query.eq('class_id', classId);
     if (studentId) query = query.eq('student_id', studentId);
-    
+
     // Determine session date for the query
     let sessionDate;
     if (date) {
@@ -169,7 +189,7 @@ exports.getStreams = async (req, res) => {
 
     // Enrich streams with attendance status (confirmed = legitimate)
     const studentIds = [...new Set(streams.map(s => s.student_id))];
-    
+
     let attendanceMap = {};
     if (studentIds.length > 0) {
       const { data: attendanceRecords } = await supabaseAdmin
@@ -177,7 +197,7 @@ exports.getStreams = async (req, res) => {
         .select('student_id, status, confirmed_at')
         .in('student_id', studentIds)
         .eq('session_date', sessionDate);
-      
+
       if (attendanceRecords) {
         attendanceRecords.forEach(a => {
           attendanceMap[a.student_id] = {
@@ -205,10 +225,10 @@ exports.getStreams = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Get RSSI streams error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to fetch RSSI streams',
-      details: error.message 
+      details: error.message
     });
   }
 };
@@ -238,9 +258,9 @@ exports.analyzeCorrelations = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Correlation analysis error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to run correlation analysis',
-      details: error.message 
+      details: error.message
     });
   }
 };

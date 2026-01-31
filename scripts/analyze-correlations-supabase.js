@@ -202,14 +202,17 @@ function groupBySession(streams) {
  */
 async function createAnomaly(classId, sessionDate, pair) {
   try {
-    // Check if already exists
+    // Normalize student order to prevent duplicates (always store smaller ID first)
+    const [s1, s2] = [pair.student1, pair.student2].sort();
+
+    // Check if already exists (with normalized order)
     const { data: existing } = await supabaseAdmin
       .from('anomalies')
       .select('id, correlation_score')
       .eq('class_id', classId)
       .eq('session_date', sessionDate)
-      .eq('student_id_1', pair.student1)
-      .eq('student_id_2', pair.student2)
+      .eq('student_id_1', s1)
+      .eq('student_id_2', s2)
       .single();
 
     if (existing) {
@@ -240,14 +243,14 @@ async function createAnomaly(classId, sessionDate, pair) {
       autoNotes = '[STATIONARY] Devices appear to be sitting together on a desk (low variance).';
     }
 
-    // Create new
+    // Create new (with normalized student order)
     await supabaseAdmin
       .from('anomalies')
       .insert({
         class_id: classId,
         session_date: sessionDate,
-        student_id_1: pair.student1,
-        student_id_2: pair.student2,
+        student_id_1: s1,
+        student_id_2: s2,
         correlation_score: pair.correlation,
         severity: pair.severity === 'critical' ? 'critical' : 'warning',
         status: status,
@@ -255,7 +258,7 @@ async function createAnomaly(classId, sessionDate, pair) {
       });
 
     const logIcon = status === 'confirmed_proxy' ? '🤖' : '🚨';
-    console.log(`${logIcon} Created anomaly (${status}): ${pair.student1} & ${pair.student2} (ρ=${pair.correlation.toFixed(4)})`);
+    console.log(`${logIcon} Created anomaly (${status}): ${s1} & ${s2} (ρ=${pair.correlation.toFixed(4)})`);
     
     return status;
 

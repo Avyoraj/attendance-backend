@@ -23,17 +23,34 @@ class CorrelationService {
     const alignResult = this.alignTimeSeries(rssiData1, rssiData2);
     const { aligned1, aligned2, timestamps, method: alignmentMethod } = alignResult;
 
-    // 2. Check if we have enough data points
+
+    // 2. Check if we have enough data points (Aligned)
     if (aligned1.length < 10) {
-      console.warn(`⚠️ Insufficient data points for correlation: ${aligned1.length} (minimum: 10)`);
+      console.warn(`⚠️ Insufficient ALIGNED data points: ${aligned1.length}. Attempting RAW stationary check...`);
+
+      // FALLBACK: Check for stationary proxy on RAW data
+      // If timestamps don't align (misconfigured clocks?) but signals are flat and identical, still flag it.
+      const rawMean1 = this.calculateMean(rssiData1.map(d => d.rssi));
+      const rawMean2 = this.calculateMean(rssiData2.map(d => d.rssi));
+      const rawStdDev1 = this.calculateStdDev(rssiData1.map(d => d.rssi), rawMean1);
+      const rawStdDev2 = this.calculateStdDev(rssiData2.map(d => d.rssi), rawMean2);
+
+      const rawStationaryCheck = this.checkStationaryProxy([], [], rawMean1, rawMean2, rawStdDev1, rawStdDev2);
+
+      if (rawStationaryCheck.isSuspiciousStationary) {
+        console.log(`🪑 RAW Stationary detection success! Flagging despite misalignment.`);
+        return {
+          correlation: 0.0, // Artificial zero, but carrying the stationary flag
+          dataPoints: rssiData1.length,
+          stationaryCheck: rawStationaryCheck,
+          alignmentMethod: 'failed_fallback_raw'
+        };
+      }
+
       return {
         correlation: null,
-        reason: 'insufficient_data',
-        dataPoints: aligned1.length,
-        aligned1,
-        aligned2,
-        commonTimestamps: timestamps,
-        alignmentMethod: alignmentMethod || 'unknown'
+        reason: 'insufficient_data_after_fallback',
+        dataPoints: aligned1.length
       };
     }
 
@@ -81,40 +98,48 @@ class CorrelationService {
    * - Signal strength will be similar (small mean difference)
    * - Correlation might be LOW because flat signals don't correlate well
    * - We need to catch this case with generous thresholds!
+   * 
+   * DEMO-READY THRESHOLDS:
+   * - Real-world RSSI stdDev is typically 3-8 for stationary phones
+   * - Real-world mean diff is typically 5-15 for phones in same room area
    */
   checkStationaryProxy(data1, data2, mean1, mean2, stdDev1, stdDev2) {
-    // INCREASED THRESHOLDS for better detection:
-    const STATIONARY_THRESHOLD = 8;    // StdDev below this = stationary (was 5, now 8)
-    const MEAN_DIFF_THRESHOLD = 12;    // If means within 12 dBm = same location (was 8, now 12)
-    
+    // DEMO-OPTIMIZED THRESHOLDS (more realistic for real-world testing):
+    const STATIONARY_THRESHOLD = 8;    // StdDev below 8 = relatively stable (realistic)
+    const VERY_STATIONARY = 4;         // StdDev below 4 = very stable
+    const MEAN_DIFF_THRESHOLD = 12;    // If means within 12 dBm = same general area
+    const MEAN_DIFF_CLOSE = 8;         // If means within 8 dBm = definitely close
+
     const isStationary1 = stdDev1 < STATIONARY_THRESHOLD;
     const isStationary2 = stdDev2 < STATIONARY_THRESHOLD;
+    const isVeryStationary1 = stdDev1 < VERY_STATIONARY;
+    const isVeryStationary2 = stdDev2 < VERY_STATIONARY;
     const meanDifference = Math.abs(mean1 - mean2);
     const isSameLocation = meanDifference <= MEAN_DIFF_THRESHOLD;
-    
+    const isVeryClose = meanDifference <= MEAN_DIFF_CLOSE;
+
     // Check if both are stationary
     const isStationary = isStationary1 && isStationary2;
+
+    // DETECTION LOGIC:
+    // 1. Both very stationary + close = DEFINITE PROXY
+    // 2. Both stationary + very close = LIKELY PROXY  
+    // 3. One very stationary + other stationary + same area = SUSPICIOUS
     
-    // ENHANCED: Also flag if ONE device is very stationary AND they are at same location
-    // This catches the case where one person holds their phone still with another person's phone nearby
-    const isOneVeryStationary = (stdDev1 < 3 || stdDev2 < 3);
-    const isBothRelativelyStationary = (stdDev1 < STATIONARY_THRESHOLD && stdDev2 < STATIONARY_THRESHOLD);
-    
-    // Primary check: both stationary at same location
-    const isSuspiciousStationary = isStationary && isSameLocation;
-    
-    // Secondary check: one very stationary + same location + other relatively stable
-    const isEnhancedSuspicious = isOneVeryStationary && isBothRelativelyStationary && isSameLocation;
-    
-    const finalSuspicious = isSuspiciousStationary || isEnhancedSuspicious;
-    
+    const isDefiniteProxy = isVeryStationary1 && isVeryStationary2 && isVeryClose;
+    const isLikelyProxy = isStationary1 && isStationary2 && isVeryClose;
+    const isSuspiciousProxy = (isVeryStationary1 || isVeryStationary2) && isStationary && isSameLocation;
+
+    const finalSuspicious = isDefiniteProxy || isLikelyProxy || isSuspiciousProxy;
+
     if (finalSuspicious) {
       console.log(`🪑 STATIONARY PROXY DETECTED:`);
-      console.log(`   - Device 1 stdDev: ${stdDev1.toFixed(2)} (stationary: ${isStationary1})`);
-      console.log(`   - Device 2 stdDev: ${stdDev2.toFixed(2)} (stationary: ${isStationary2})`);
-      console.log(`   - Mean difference: ${meanDifference.toFixed(2)} dBm (same location: ${isSameLocation})`);
+      console.log(`   - Device 1 stdDev: ${stdDev1.toFixed(2)} (stationary: ${isStationary1}, very: ${isVeryStationary1})`);
+      console.log(`   - Device 2 stdDev: ${stdDev2.toFixed(2)} (stationary: ${isStationary2}, very: ${isVeryStationary2})`);
+      console.log(`   - Mean difference: ${meanDifference.toFixed(2)} dBm (close: ${isVeryClose}, same area: ${isSameLocation})`);
+      console.log(`   - Detection: ${isDefiniteProxy ? 'DEFINITE' : isLikelyProxy ? 'LIKELY' : 'SUSPICIOUS'}`);
     }
-    
+
     return {
       isStationary,
       isStationary1,
@@ -124,8 +149,8 @@ class CorrelationService {
       meanDifference,
       isSameLocation,
       isSuspiciousStationary: finalSuspicious,
-      reason: finalSuspicious 
-        ? `Both devices stationary at same location (stdDev: ${stdDev1.toFixed(2)}, ${stdDev2.toFixed(2)}, mean diff: ${meanDifference.toFixed(2)} dBm)` 
+      reason: finalSuspicious
+        ? `Both devices stationary at same location (stdDev: ${stdDev1.toFixed(2)}, ${stdDev2.toFixed(2)}, mean diff: ${meanDifference.toFixed(2)} dBm)`
         : null
     };
   }
@@ -185,17 +210,40 @@ class CorrelationService {
   alignTimeSeries(rssiData1, rssiData2) {
     // First, try timestamp-based alignment
     const timestampResult = this.alignByTimestamp(rssiData1, rssiData2);
-    
+
     // If we got enough aligned points (at least 10), use timestamp alignment
     if (timestampResult.aligned1.length >= 10) {
       console.log(`🔗 Timestamp alignment: ${timestampResult.aligned1.length} common points`);
       return { ...timestampResult, method: 'timestamp' };
     }
-    
+
+    // FALLBACK: Check for stationary proxy on RAW data
+    // If timestamps don't align (misconfigured clocks?) but signals are flat and identical, still flag it.
+    const rawMean1 = this.calculateMean(rssiData1.map(d => d.rssi));
+    const rawMean2 = this.calculateMean(rssiData2.map(d => d.rssi));
+    const rawStdDev1 = this.calculateStdDev(rssiData1.map(d => d.rssi), rawMean1);
+    const rawStdDev2 = this.calculateStdDev(rssiData2.map(d => d.rssi), rawMean2);
+
+    const rawStationaryCheck = this.checkStationaryProxy([], [], rawMean1, rawMean2, rawStdDev1, rawStdDev2);
+
+    if (rawStationaryCheck.isSuspiciousStationary) {
+      console.log(`🪑 RAW Stationary detection success! Flagging despite misalignment.`);
+      return {
+        correlation: 0.0, // Artificial zero, but carrying the stationary flag
+        dataPoints: rssiData1.length,
+        aligned1: [],
+        aligned2: [],
+        quantiles: [],
+        timestamps: [],
+        stationaryCheck: rawStationaryCheck,
+        method: 'failed_fallback_raw'
+      };
+    }
+
     // Otherwise, use sliding window sequence-based alignment
     console.log(`⚠️ Timestamp alignment failed (${timestampResult.aligned1.length} points), using sliding window...`);
     const slidingResult = this.alignBySlidingWindow(rssiData1, rssiData2);
-    
+
     return { ...slidingResult, method: 'sliding_window' };
   }
 
@@ -219,7 +267,7 @@ class CorrelationService {
     const aligned1 = [];
     const aligned2 = [];
     const timestamps = [];
-    const tolerance = 2000; // 2 seconds
+    const tolerance = 4500; // INCREASED to 4.5s (was 2s) to handle batch upload jitter
 
     const times1 = Array.from(map1.keys()).sort((a, b) => a - b);
     const times2 = Array.from(map2.keys()).sort((a, b) => a - b);
@@ -257,72 +305,72 @@ class CorrelationService {
     // Sort by timestamp and extract RSSI values
     const sorted1 = [...rssiData1].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     const sorted2 = [...rssiData2].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-    
+
     const seq1 = sorted1.map(d => d.rssi);
     const seq2 = sorted2.map(d => d.rssi);
-    
+
     console.log(`📊 Sliding window: seq1=${seq1.length} points, seq2=${seq2.length} points`);
-    
+
     // Minimum window size for meaningful correlation
     const MIN_WINDOW = 10;
-    
+
     if (seq1.length < MIN_WINDOW || seq2.length < MIN_WINDOW) {
       console.log(`⚠️ Sequences too short for sliding window (need ${MIN_WINDOW})`);
       return { aligned1: [], aligned2: [], timestamps: [] };
     }
-    
+
     // Determine which is longer/shorter
-    const [longer, shorter, longerSorted, shorterSorted] = seq1.length >= seq2.length 
-      ? [seq1, seq2, sorted1, sorted2] 
+    const [longer, shorter, longerSorted, shorterSorted] = seq1.length >= seq2.length
+      ? [seq1, seq2, sorted1, sorted2]
       : [seq2, seq1, sorted2, sorted1];
-    
+
     let bestCorrelation = -2; // Start below minimum possible (-1)
     let bestOffset = 0;
     let bestWindowSize = MIN_WINDOW;
-    
+
     // Window size: use the shorter sequence length, but cap at reasonable size
     const windowSize = Math.min(shorter.length, longer.length, 60); // Max 60 points (~5 min at 5s intervals)
-    
+
     // Slide the window across all possible positions
     const maxOffset = longer.length - windowSize + 1;
-    
+
     console.log(`🔄 Testing ${maxOffset} window positions (window size: ${windowSize})`);
-    
+
     for (let offset = 0; offset < maxOffset; offset++) {
       // Extract windows
       const window1 = longer.slice(offset, offset + windowSize);
       const window2 = shorter.slice(0, windowSize);
-      
+
       // Quick correlation calculation
       const corr = this.quickCorrelation(window1, window2);
-      
+
       if (corr !== null && corr > bestCorrelation) {
         bestCorrelation = corr;
         bestOffset = offset;
         bestWindowSize = windowSize;
       }
     }
-    
+
     // Also try sliding shorter over longer (reverse direction)
     const maxOffset2 = shorter.length - windowSize + 1;
     for (let offset = 0; offset < maxOffset2; offset++) {
       const window1 = longer.slice(0, windowSize);
       const window2 = shorter.slice(offset, offset + windowSize);
-      
+
       const corr = this.quickCorrelation(window1, window2);
-      
+
       if (corr !== null && corr > bestCorrelation) {
         bestCorrelation = corr;
         bestOffset = -offset; // Negative to indicate reverse direction
         bestWindowSize = windowSize;
       }
     }
-    
+
     console.log(`✅ Best alignment: offset=${bestOffset}, correlation=${bestCorrelation.toFixed(4)}`);
-    
+
     // Extract the best aligned sequences
     let aligned1, aligned2, timestamps;
-    
+
     if (bestOffset >= 0) {
       aligned1 = longer.slice(bestOffset, bestOffset + bestWindowSize);
       aligned2 = shorter.slice(0, bestWindowSize);
@@ -332,14 +380,14 @@ class CorrelationService {
       aligned2 = shorter.slice(-bestOffset, -bestOffset + bestWindowSize);
       timestamps = longerSorted.slice(0, bestWindowSize).map(d => new Date(d.timestamp));
     }
-    
+
     // Swap back if we swapped earlier
     if (seq1.length < seq2.length) {
       [aligned1, aligned2] = [aligned2, aligned1];
     }
-    
+
     console.log(`🔗 Sliding window aligned ${aligned1.length} points (best corr: ${bestCorrelation.toFixed(4)})`);
-    
+
     return { aligned1, aligned2, timestamps, slidingCorrelation: bestCorrelation };
   }
 
@@ -349,10 +397,10 @@ class CorrelationService {
    */
   quickCorrelation(data1, data2) {
     if (data1.length !== data2.length || data1.length < 5) return null;
-    
+
     const n = data1.length;
     let sum1 = 0, sum2 = 0, sum1Sq = 0, sum2Sq = 0, pSum = 0;
-    
+
     for (let i = 0; i < n; i++) {
       sum1 += data1[i];
       sum2 += data2[i];
@@ -360,10 +408,10 @@ class CorrelationService {
       sum2Sq += data2[i] * data2[i];
       pSum += data1[i] * data2[i];
     }
-    
+
     const num = pSum - (sum1 * sum2 / n);
     const den = Math.sqrt((sum1Sq - sum1 * sum1 / n) * (sum2Sq - sum2 * sum2 / n));
-    
+
     if (den === 0) return 0;
     return num / den;
   }
@@ -397,19 +445,29 @@ class CorrelationService {
    * Now includes stationary detection for the "desk scenario"
    * 
    * Detection strategies:
-   * 1. HIGH CORRELATION (≥0.8): Devices moving together (walking together)
+   * 1. HIGH CORRELATION (≥0.7): Devices moving together (walking together)
    * 2. STATIONARY PROXY: Both stable + same location (phones on desk together)
+   * 3. MODERATE CORRELATION + CLOSE: Devices near each other with some movement
    * 
    * @param {Number} correlation - Pearson correlation coefficient
    * @param {Object} stationaryCheck - Result from checkStationaryProxy
    * @returns {Object} { suspicious, reason }
    */
   isSuspicious(correlation, stationaryCheck = null) {
-    // HIGH CORRELATION = moving together (lowered from 0.85 to 0.8 for better detection)
-    if (Math.abs(correlation) >= 0.8) {
+    // STATIONARY PROXY detection (desk scenario) - CHECK FIRST!
+    // This is the most reliable for demo (phones on desk together)
+    if (stationaryCheck && stationaryCheck.isSuspiciousStationary) {
+      return {
+        suspicious: true,
+        reason: 'stationary_proxy',
+        description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm, stdDev: ${stationaryCheck.stdDev1?.toFixed(2) || 'N/A'}, ${stationaryCheck.stdDev2?.toFixed(2) || 'N/A'})`
+      };
+    }
+
+    // HIGH CORRELATION = moving together (lowered to 0.7 for better detection)
+    if (Math.abs(correlation) >= 0.7) {
       // EXCEPTION: If mean difference is huge, they are likely far apart
-      // Two flat lines will have correlation ~1.0, but if 20dBm apart, not same person
-      if (stationaryCheck && stationaryCheck.meanDifference > 15) {
+      if (stationaryCheck && stationaryCheck.meanDifference > 20) {
         return {
           suspicious: false,
           reason: 'high_correlation_but_distant',
@@ -423,27 +481,17 @@ class CorrelationService {
         description: `High correlation (ρ = ${correlation.toFixed(4)}) - devices moving together`
       };
     }
-    
-    // STATIONARY PROXY detection (desk scenario) - PRIORITY CHECK
-    // This catches cases where correlation is LOW but both phones are sitting together
-    if (stationaryCheck && stationaryCheck.isSuspiciousStationary) {
-      return {
-        suspicious: true,
-        reason: 'stationary_proxy',
-        description: `Stationary proxy detected - both devices stable at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm, stdDev: ${stationaryCheck.stdDev1?.toFixed(2) || 'N/A'}, ${stationaryCheck.stdDev2?.toFixed(2) || 'N/A'})`
-      };
-    }
-    
-    // MODERATE CORRELATION (0.6-0.8) + SAME LOCATION = also suspicious
+
+    // MODERATE CORRELATION (0.5-0.7) + SAME LOCATION = also suspicious
     // This catches borderline cases where phones are together but have slight movement differences
-    if (Math.abs(correlation) >= 0.6 && stationaryCheck && stationaryCheck.isSameLocation) {
+    if (Math.abs(correlation) >= 0.5 && stationaryCheck && stationaryCheck.isSameLocation) {
       return {
         suspicious: true,
         reason: 'moderate_correlation_same_location',
         description: `Moderate correlation (ρ = ${correlation.toFixed(4)}) at same location (mean diff: ${stationaryCheck.meanDifference.toFixed(2)} dBm)`
       };
     }
-    
+
     return {
       suspicious: false,
       reason: 'normal',
